@@ -5,7 +5,7 @@
 - `frontend/` — Vue 3 renderer (UI). Styling is 100% **Tailwind CSS v4** via `@tailwindcss/vite`; there is no component CSS — `frontend/assets/app.css` only contains `@import 'tailwindcss'`, the `@theme` block (color/font tokens) and global rules (reset, scrollbars, `TransitionGroup` transitions).
 - `backend/` — Electron main, IPC, services, preload (source), workers, Node core/parse, `cli/` (headless unpak/repak)
 - `shared/` — shared IPC types/contracts (renderer + main + preload). No unpack/decrypt logic.
-- `build/` — `icon.ico` / `icon.png` (generated from `frontend/assets/icon.svg` by `npm run icon`) plus the `aion-pak.cmd` wrapper
+- `build/` — `icon.ico` (Windows, generated from `frontend/assets/icon.svg` by `npm run icon`) plus the `aion-pak.cmd` wrapper; Linux uses `frontend/assets/icon.png`, and the app header uses `frontend/assets/icon.svg` (single source, no copies under `build/`); `version.json` (repo root) is the tiny update manifest served as a release asset / CDN fallback
 - `scripts/` — build helpers (version bump, icon, CLI bootstrap); `scripts/linux/` — **native** Linux builder (`build.sh` + `_common.sh`); `dist-linux-wsl.mjs` — Windows → **WSL2** driver (invokes the native builder inside the distros)
 - `.build/` — build artifacts (gitignored)
 - All logic is implemented in Node.js; target: **Aion 1**.

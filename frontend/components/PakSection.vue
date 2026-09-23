@@ -99,6 +99,8 @@ async function unpackSelected(): Promise<void> {
         includeNonPak: true,
         overwrite: false,
         showFileProgress: getShowFileNames(),
+        unpakedDir: state.customDirs.unpaked || undefined,
+        pakDir: state.customDirs.pak || undefined,
       }
 
       setSummary(t('pak.extractingFolder', { i: i + 1, total: folders.length }), 'info')
@@ -137,8 +139,16 @@ async function unpackSelected(): Promise<void> {
           : t('pak.extractingNLog', { n: paks.length }),
       )
       const result = shouldDecrypt
-        ? await electron.unpakDecryptPackages(paks, { showFileProgress: getShowFileNames() })
-        : await electron.unpakPackages(paks, { showFileProgress: getShowFileNames() })
+        ? await electron.unpakDecryptPackages(paks, {
+            showFileProgress: getShowFileNames(),
+            unpakedDir: state.customDirs.unpaked || undefined,
+            pakDir: state.customDirs.pak || undefined,
+          })
+        : await electron.unpakPackages(paks, {
+            showFileProgress: getShowFileNames(),
+            unpakedDir: state.customDirs.unpaked || undefined,
+            pakDir: state.customDirs.pak || undefined,
+          })
       if (result.success) {
         const successCount = result.results?.success.length ?? 0
         const failedCount = result.results?.failed.length ?? 0

@@ -3,12 +3,14 @@ import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { PakDatabaseInfo } from '../../shared/api-types'
 import { useElectron } from '../composables/useElectron'
+import { useAppState } from '../composables/useAppState'
 
 const props = defineProps<{ open: boolean; initialDbPath?: string | null }>()
 const emit = defineEmits<{ (e: 'close'): void }>()
 
 const { t } = useI18n()
 const electron = useElectron()
+const { state } = useAppState()
 
 const loading = ref(false)
 const building = ref(false)
@@ -192,7 +194,7 @@ async function loadDatabase(dbPath: string): Promise<void> {
   treeRoot.value = emptyRoot()
   expanded.value = new Set()
   try {
-    const result = await electron.readPakDatabase(dbPath)
+    const result = await electron.readPakDatabase(dbPath, state.customDirs.unpaked || undefined)
     if (id !== requestId.value) return
     if (!result.success || !result.info) {
       error.value = t('db.readFail', { error: result.error })

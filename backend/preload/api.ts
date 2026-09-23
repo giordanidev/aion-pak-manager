@@ -37,6 +37,13 @@ function readShowFileProgress(opts: unknown): boolean | undefined {
 	return undefined
 }
 
+function readDirOption(opts: unknown, key: 'unpakedDir' | 'pakDir' | 'repakedDir'): string | undefined {
+	if (isRecord(opts) && typeof opts[key] === 'string' && (opts[key] as string).length > 0) {
+		return opts[key] as string
+	}
+	return undefined
+}
+
 function toCloneable<T>(value: T): T {
 	return JSON.parse(JSON.stringify(value)) as T
 }
@@ -54,22 +61,22 @@ export function buildElectronApi(): ElectronApi {
 			ipcRenderer.invoke('list-pak-contents', toCloneable({ pakPath, base })),
 
 		unpakPackages: (paths: string[], opts?: ProgressOptions): Promise<OperationResult> =>
-			ipcRenderer.invoke('unpak-packages', toCloneable({ paths: Array.from(paths), showFileProgress: readShowFileProgress(opts) })),
+			ipcRenderer.invoke('unpak-packages', toCloneable({ paths: Array.from(paths), showFileProgress: readShowFileProgress(opts), unpakedDir: readDirOption(opts, 'unpakedDir'), pakDir: readDirOption(opts, 'pakDir') })),
 
 		unpakDecryptPackages: (paths: string[], opts?: ProgressOptions): Promise<OperationResult> =>
-			ipcRenderer.invoke('unpak-decrypt-packages', toCloneable({ paths: Array.from(paths), showFileProgress: readShowFileProgress(opts) })),
+			ipcRenderer.invoke('unpak-decrypt-packages', toCloneable({ paths: Array.from(paths), showFileProgress: readShowFileProgress(opts), unpakedDir: readDirOption(opts, 'unpakedDir'), pakDir: readDirOption(opts, 'pakDir') })),
 
 		unpakPakEntries: (pakPath: string, entries: string[], opts?: ProgressOptions): Promise<OperationResult> =>
-			ipcRenderer.invoke('unpak-pak-entries', toCloneable({ pakPath, entries: Array.from(entries), showFileProgress: readShowFileProgress(opts) })),
+			ipcRenderer.invoke('unpak-pak-entries', toCloneable({ pakPath, entries: Array.from(entries), showFileProgress: readShowFileProgress(opts), unpakedDir: readDirOption(opts, 'unpakedDir'), pakDir: readDirOption(opts, 'pakDir') })),
 
 		unpakDecryptPakEntries: (pakPath: string, entries: string[], opts?: ProgressOptions): Promise<OperationResult> =>
-			ipcRenderer.invoke('unpak-decrypt-pak-entries', toCloneable({ pakPath, entries: Array.from(entries), showFileProgress: readShowFileProgress(opts) })),
+			ipcRenderer.invoke('unpak-decrypt-pak-entries', toCloneable({ pakPath, entries: Array.from(entries), showFileProgress: readShowFileProgress(opts), unpakedDir: readDirOption(opts, 'unpakedDir'), pakDir: readDirOption(opts, 'pakDir') })),
 
 		decryptPackages: (paths: string[], opts?: ProgressOptions): Promise<OperationResult> =>
-			ipcRenderer.invoke('decrypt-packages', toCloneable({ paths: Array.from(paths), showFileProgress: readShowFileProgress(opts) })),
+			ipcRenderer.invoke('decrypt-packages', toCloneable({ paths: Array.from(paths), showFileProgress: readShowFileProgress(opts), unpakedDir: readDirOption(opts, 'unpakedDir'), pakDir: readDirOption(opts, 'pakDir') })),
 
 		repackPackages: (paths: string[], opts?: ProgressOptions): Promise<OperationResult> =>
-			ipcRenderer.invoke('repack-packages', toCloneable({ paths: Array.from(paths), showFileProgress: readShowFileProgress(opts) })),
+			ipcRenderer.invoke('repack-packages', toCloneable({ paths: Array.from(paths), showFileProgress: readShowFileProgress(opts), unpakedDir: readDirOption(opts, 'unpakedDir'), repakedDir: readDirOption(opts, 'repakedDir'), pakDir: readDirOption(opts, 'pakDir') })),
 
 		extractFolder: (payload: ExtractFolderPayload): Promise<ExtractFolderResult> =>
 			ipcRenderer.invoke('extract-folder', toCloneable({
@@ -77,6 +84,8 @@ export function buildElectronApi(): ElectronApi {
 				includeNonPak: payload.includeNonPak,
 				overwrite: payload.overwrite,
 				showFileProgress: payload.showFileProgress,
+				unpakedDir: payload.unpakedDir,
+				pakDir: payload.pakDir,
 			})),
 
 		decryptUnpaked: (paths: string[], opts?: ProgressOptions): Promise<OperationResult> =>
@@ -86,6 +95,8 @@ export function buildElectronApi(): ElectronApi {
 			ipcRenderer.invoke('repack-unpaked', toCloneable({
 				selectedFolderPaths: Array.from(payload.selectedFolderPaths),
 				showFileProgress: payload.showFileProgress,
+				repakedDir: payload.repakedDir,
+				unpakedDir: payload.unpakedDir,
 			})),
 
 		addFilesToPak: (payload: AddFilesToPakPayload): Promise<OperationResult> =>
@@ -116,10 +127,11 @@ export function buildElectronApi(): ElectronApi {
 
 		openFolder: (dir: string): Promise<OpenFolderResult> => ipcRenderer.invoke('open-folder', toCloneable({ dir })),
 
-		listPakDatabases: (): Promise<ListPakDatabasesResult> => ipcRenderer.invoke('list-pak-databases'),
+		listPakDatabases: (unpakedDir?: string): Promise<ListPakDatabasesResult> =>
+			ipcRenderer.invoke('list-pak-databases', toCloneable({ unpakedDir })),
 
-		readPakDatabase: (dbPath: string): Promise<ReadPakDatabaseResult> =>
-			ipcRenderer.invoke('read-pak-database', toCloneable({ dbPath })),
+		readPakDatabase: (dbPath: string, base?: string): Promise<ReadPakDatabaseResult> =>
+			ipcRenderer.invoke('read-pak-database', toCloneable({ dbPath, base })),
 
 		getSettings: (): Promise<SettingsResult> => ipcRenderer.invoke('settings-get'),
 

@@ -1,5 +1,7 @@
-// Generates build/icon.ico (Windows installer/app) and build/icon.png (Linux)
-// from frontend/assets/icon.svg. Run with: npm run icon
+// Generates build/icon.ico (Windows installer/app) from
+// frontend/assets/icon.svg — the single source icon (also used by the app
+// header). Linux uses frontend/assets/icon.png, so no PNG/SVG is duplicated
+// under build/. Run with: npm run icon
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
@@ -10,7 +12,6 @@ import pngToIco from 'png-to-ico'
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const svgPath = path.join(root, 'frontend', 'assets', 'icon.svg')
 const outIco = path.join(root, 'build', 'icon.ico')
-const outPng = path.join(root, 'build', 'icon.png')
 
 const svg = readFileSync(svgPath, 'utf8')
 
@@ -34,6 +35,3 @@ mkdirSync(path.dirname(outIco), { recursive: true })
 const ico = await pngToIco(renderSquare(256))
 writeFileSync(outIco, ico)
 console.log(`icon.ico generated (256/48/32/16): ${outIco}`)
-
-writeFileSync(outPng, renderSquare(512))
-console.log(`icon.png generated (512x512): ${outPng}`)

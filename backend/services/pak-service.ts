@@ -40,6 +40,12 @@ export interface PakServiceResult {
 export interface PakServiceOptions {
 	onProgress?: ProgressCallback;
 	signal?: AbortSignal;
+	/** Extraction output root (custom "unpaked" folder); defaults to /PAKS/unpaked. */
+	unpakedDir?: string;
+	/** RePAK output root (custom "repaked" folder); defaults to /PAKS/repaked. */
+	repakedDir?: string;
+	/** Source PAK root (custom "pak" folder); defaults to /PAKS/pak. */
+	pakDir?: string;
 }
 
 function abortIfCanceled(signal?: AbortSignal): void {
@@ -55,14 +61,22 @@ function decryptFailuresSample(failed: { path: string; error: string }[]): strin
 	return samples.length > 0 ? ` (${samples.join('; ')})` : ''
 }
 
-/** Individual UnPAK output: `PAKS/unpaked/<name-without-.pak>` (mirrors subpaths). */
-function packageOutputFolder(packagePath: string): string {
-	return unpakedSingleFolderForPak(packagePath)
+/** Individual UnPAK output: `<unpakedRoot>/<name-without-.pak>` (mirrors subpaths). */
+function packageOutputFolder(
+	packagePath: string,
+	unpakedRoot: string = UNPAKED_DIR,
+	pakRoot: string = PAK_DIR,
+): string {
+	return unpakedSingleFolderForPak(packagePath, unpakedRoot, pakRoot)
 }
 
 /** Folder-extract output (keeps `.pak` name + DB): used by repack/decrypt lookups. */
-export function packageFolderExtractPath(packagePath: string): string {
-	return unpakedFolderForPak(packagePath)
+export function packageFolderExtractPath(
+	packagePath: string,
+	unpakedRoot: string = UNPAKED_DIR,
+	pakRoot: string = PAK_DIR,
+): string {
+	return unpakedFolderForPak(packagePath, unpakedRoot, pakRoot)
 }
 
 async function existsAsync(target: string): Promise<boolean> {
@@ -100,15 +114,20 @@ async function readDbRelPakPath(dbPath: string): Promise<string | null> {
 	}
 }
 
-/** Mirror `PAKS/pak/.../name.pak` (or the DB `relPakPath`) under /PAKS/repaked. Never duplicates `.pak.pak`. */
-async function repakOutputForPackage(packagePath: string, folderPath: string): Promise<string> {
+/** Mirror `PAKS/pak/.../name.pak` (or the DB `relPakPath`) under the repaked root. Never duplicates `.pak.pak`. */
+async function repakOutputForPackage(
+	packagePath: string,
+	folderPath: string,
+	repakedRoot: string = REPAKED_DIR,
+	pakRoot: string = PAK_DIR,
+): Promise<string> {
 	const fromDb = await readDbRelPakPath(`${path.resolve(folderPath)}.db`)
-	const rel = fromDb ?? pakRelPathFromFiles(packagePath)
+	const rel = fromDb ?? pakRelPathFromFiles(packagePath, pakRoot)
 	const relParts = rel.split('/')
 	const last = relParts[relParts.length - 1] ?? ''
 	const normalizedLast = last.toLowerCase().endsWith('.pak') ? last : `${last}.pak`
 	const normalized = [...relParts.slice(0, -1), normalizedLast].join('/')
-	return path.join(REPAKED_DIR, ...normalized.split('/'))
+	return path.join(repakedRoot, ...normalized.split('/'))
 }
 
 function isSubPath(parent: string, child: string): boolean {
@@ -116,10 +135,11 @@ function isSubPath(parent: string, child: string): boolean {
 	return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel)
 }
 
-function ensureInsidePakDir(pkg: string): void {
+function ensureInsidePakDir(pkg: string, pakRoot: string = PAK_DIR): void {
 	const resolved = path.resolve(pkg)
-	if (!isSubPath(PAK_DIR, resolved) && path.resolve(PAK_DIR) !== resolved) {
-		throw new Error(`Refusing to extract outside /PAKS/pak: ${pkg}`)
+	const root = path.resolve(pakRoot)
+	if (!isSubPath(root, resolved) && root !== resolved) {
+		throw new Error(`Refusing to extract outside the source PAK folder: ${pkg}`)
 	}
 }
 
@@ -175,12 +195,14 @@ async function unpackOne(
 	signal: AbortSignal | undefined,
 	useWorker: Piscina<UnpakTaskInput, UnpakTaskResult>,
 	entries?: string[],
+	unpakedRoot: string = UNPAKED_DIR,
+	pakRoot: string = PAK_DIR,
 ): Promise<UnpackOneResult> {
 	const packageName = path.basename(pkg)
-	const outputFolder = packageOutputFolder(pkg)
+	const outputFolder = packageOutputFolder(pkg, unpakedRoot, pakRoot)
 	const selectedEntries = entries && entries.length > 0 ? entries : undefined
 	try {
-		ensureInsidePakDir(pkg)
+		ensureInsidePakDir(pkg, pakRoot)
 		await ensureDirAsync(outputFolder)
 		// Pre-count file entries (yields to the event loop) so per-file
 		// progress has a stable total before the worker starts. Selective
@@ -215,6 +237,9 @@ export async function unpackPackages(
 	const totalPackages = packagePaths.length
 	if (totalPackages === 0) return results
 
+	const unpakedRoot = options.unpakedDir ? path.resolve(options.unpakedDir) : UNPAKED_DIR
+	const pakRoot = options.pakDir ? path.resolve(options.pakDir) : PAK_DIR
+
 	const threads = cpuThreadsForWork()
 	let pool: Piscina<UnpakTaskInput, UnpakTaskResult> | null = null
 	try {
@@ -237,8 +262,8 @@ export async function unpackPackages(
 			const pkg = packagePaths[i] as string
 			const packageName = path.basename(pkg)
 			try {
-				ensureInsidePakDir(pkg)
-				const outputFolder = packageOutputFolder(pkg)
+				ensureInsidePakDir(pkg, pakRoot)
+				const outputFolder = packageOutputFolder(pkg, unpakedRoot, pakRoot)
 				await ensureDirAsync(outputFolder)
 				jobs.push({ pakPath: pkg, outputFolder, packageName, packageIndex: i + 1, packageTotal: totalPackages })
 			} catch (error) {
@@ -285,6 +310,9 @@ export async function unpackAndDecryptPackages(
 	const totalPackages = packagePaths.length
 	if (totalPackages === 0) return results
 
+	const unpakedRoot = options.unpakedDir ? path.resolve(options.unpakedDir) : UNPAKED_DIR
+	const pakRoot = options.pakDir ? path.resolve(options.pakDir) : PAK_DIR
+
 	const concurrency = cpuThreadsForWork()
 	let unpakPool: Piscina<UnpakTaskInput, UnpakTaskResult> | null = null
 	try {
@@ -306,7 +334,7 @@ export async function unpackAndDecryptPackages(
 				async (pkg, i) => {
 					const packageIndex = i + 1
 					const packageName = path.basename(pkg)
-					const unpacked = await unpackOne(pkg, packageIndex, totalPackages, onProgress, options.signal, unpakPool!)
+					const unpacked = await unpackOne(pkg, packageIndex, totalPackages, onProgress, options.signal, unpakPool!, undefined, unpakedRoot, pakRoot)
 					if (!unpacked.ok || !unpacked.entry) {
 						return { ok: false as const, failure: unpacked.failure! }
 					}
@@ -363,6 +391,8 @@ async function unpackPakEntriesInternal(
 ): Promise<PakServiceResult> {
 	const onProgress = options.onProgress
 	const results: PakServiceResult = { success: [], failed: [] }
+	const unpakedRoot = options.unpakedDir ? path.resolve(options.unpakedDir) : UNPAKED_DIR
+	const pakRoot = options.pakDir ? path.resolve(options.pakDir) : PAK_DIR
 	const packageName = path.basename(pakPath)
 	const normalizedEntries = Array.from(
 		new Set(entries.map((entry) => entry.replace(/\\/g, '/')).filter((entry) => entry.length > 0)),
@@ -389,7 +419,7 @@ async function unpackPakEntriesInternal(
 			decryptPool = createDecryptPool()
 		}
 
-		const unpacked = await unpackOne(pakPath, 1, 1, onProgress, options.signal, unpakPool, normalizedEntries)
+		const unpacked = await unpackOne(pakPath, 1, 1, onProgress, options.signal, unpakPool, normalizedEntries, unpakedRoot, pakRoot)
 		if (!unpacked.ok || !unpacked.entry) {
 			results.failed.push(unpacked.failure!)
 			return results
@@ -450,18 +480,26 @@ export async function unpackAndDecryptPakEntries(
 	return unpackPakEntriesInternal(pakPath, entries, true, options)
 }
 
-async function resolveDecryptFolder(packagePath: string): Promise<string | null> {
-	let outputFolder = packageOutputFolder(packagePath)
+async function resolveDecryptFolder(
+	packagePath: string,
+	unpakedRoot: string = UNPAKED_DIR,
+	pakRoot: string = PAK_DIR,
+): Promise<string | null> {
+	const outputFolder = packageOutputFolder(packagePath, unpakedRoot, pakRoot)
 	if (await isDirectoryAsync(outputFolder)) return outputFolder
-	const legacy = packageFolderExtractPath(packagePath)
+	const legacy = packageFolderExtractPath(packagePath, unpakedRoot, pakRoot)
 	if (await isDirectoryAsync(legacy)) return legacy
 	return null
 }
 
-async function resolveRepackFolder(packagePath: string): Promise<string | null> {
-	const folderPath = packageOutputFolder(packagePath)
+async function resolveRepackFolder(
+	packagePath: string,
+	unpakedRoot: string = UNPAKED_DIR,
+	pakRoot: string = PAK_DIR,
+): Promise<string | null> {
+	const folderPath = packageOutputFolder(packagePath, unpakedRoot, pakRoot)
 	if (await isDirectoryAsync(folderPath)) return folderPath
-	const legacy = packageFolderExtractPath(packagePath)
+	const legacy = packageFolderExtractPath(packagePath, unpakedRoot, pakRoot)
 	if (await isDirectoryAsync(legacy)) return legacy
 	return null
 }
@@ -475,6 +513,9 @@ export async function decryptPackages(
 	const totalPackages = packagePaths.length
 	if (totalPackages === 0) return results
 
+	const unpakedRoot = options.unpakedDir ? path.resolve(options.unpakedDir) : UNPAKED_DIR
+	const pakRoot = options.pakDir ? path.resolve(options.pakDir) : PAK_DIR
+
 	const decryptPool = createDecryptPool()
 	try {
 		const outcomes = await mapPool(
@@ -485,9 +526,9 @@ export async function decryptPackages(
 				const packageName = path.basename(pkg)
 				const packageIndex = i + 1
 				// Prefer individual output; fall back to folder-extract path.
-				const outputFolder = await resolveDecryptFolder(pkg)
+				const outputFolder = await resolveDecryptFolder(pkg, unpakedRoot, pakRoot)
 				if (!outputFolder) {
-					const fallback = packageOutputFolder(pkg)
+					const fallback = packageOutputFolder(pkg, unpakedRoot, pakRoot)
 					return {
 						ok: false as const,
 						failure: { packageName, packagePath: pkg, error: `Extracted folder not found: ${fallback}` } as PakFailure,
@@ -542,9 +583,10 @@ export async function repackPackages(
 	const totalPackages = packagePaths.length
 	if (totalPackages === 0) return results
 
-	await ensureDirAsync(REPAKED_DIR)
-	// UNPAKED_DIR is only read here; ensure import is not elided for clarity.
-	void UNPAKED_DIR
+	const unpakedRoot = options.unpakedDir ? path.resolve(options.unpakedDir) : UNPAKED_DIR
+	const repakedRoot = options.repakedDir ? path.resolve(options.repakedDir) : REPAKED_DIR
+	const pakRoot = options.pakDir ? path.resolve(options.pakDir) : PAK_DIR
+	await ensureDirAsync(repakedRoot)
 
 	let pool: Piscina<RepakTaskInput, RepakTaskResult> | null = null
 	try {
@@ -565,9 +607,9 @@ export async function repackPackages(
 				abortIfCanceled(options.signal)
 				const packageName = path.basename(pkg)
 				const packageIndex = i + 1
-				const folderPathCandidate = await resolveRepackFolder(pkg)
-				const folderPath = folderPathCandidate ?? packageOutputFolder(pkg)
-				const outputPak = await repakOutputForPackage(pkg, folderPath)
+				const folderPathCandidate = await resolveRepackFolder(pkg, unpakedRoot, pakRoot)
+				const folderPath = folderPathCandidate ?? packageOutputFolder(pkg, unpakedRoot, pakRoot)
+				const outputPak = await repakOutputForPackage(pkg, folderPath, repakedRoot, pakRoot)
 				onProgress?.({
 					stage: 'repak-start',
 					packageName,

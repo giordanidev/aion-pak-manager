@@ -1,3 +1,4 @@
+import './bin/threadpool'
 import { app, BrowserWindow, screen } from 'electron'
 import { existsSync } from 'fs'
 import { join } from 'path'

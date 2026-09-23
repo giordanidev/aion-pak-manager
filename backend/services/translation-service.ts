@@ -25,6 +25,12 @@ export interface TranslationServiceOptions {
 	signal?: AbortSignal;
 	/** Interactive resolver for `.pak` conflicts; when absent, conflicts are skipped. */
 	onConflict?: (request: ExtractConflictRequest) => Promise<ConflictChoice>;
+	/** Extraction output root (custom "unpaked" folder); defaults to /PAKS/unpaked. */
+	unpakedDir?: string;
+	/** RePAK output root (custom "repaked" folder); defaults to /PAKS/repaked. */
+	repakedDir?: string;
+	/** Source PAK root (custom "pak" folder); defaults to /PAKS/pak. */
+	pakDir?: string;
 }
 
 export interface ExtractFolderPayload {
@@ -395,9 +401,12 @@ function normalizePakEntry(value: unknown): AggregatedPakEntry | null {
  * to the legacy sibling location (`<selection>.db`). Returns `null` when absent
  * or when it is a legacy single-pak DB.
  */
-async function readAggregatedPakEntries(selectionAbs: string): Promise<AggregatedPakEntry[] | null> {
-	const raw = (await readJsonFile(unpakedRootDbForFolder(selectionAbs)))
-		?? (await readJsonFile(unpakedLegacyRootDbForFolder(selectionAbs)))
+async function readAggregatedPakEntries(
+	selectionAbs: string,
+	unpakedRoot: string = UNPAKED_DIR,
+): Promise<AggregatedPakEntry[] | null> {
+	const raw = (await readJsonFile(unpakedRootDbForFolder(selectionAbs, unpakedRoot)))
+		?? (await readJsonFile(unpakedLegacyRootDbForFolder(selectionAbs, unpakedRoot)))
 	if (!raw || !Array.isArray(raw['paks'])) return null
 	return (raw['paks'] as unknown[]).map(normalizePakEntry).filter((e): e is AggregatedPakEntry => e !== null)
 }
@@ -424,6 +433,8 @@ export async function extractFolder(
 ): Promise<ExtractFolderResult> {
 	const onProgress = options.onProgress
 	const inputResolved = path.resolve(payload.inputFolder)
+	const unpakedRoot = options.unpakedDir ? path.resolve(options.unpakedDir) : UNPAKED_DIR
+	const pakRoot = options.pakDir ? path.resolve(options.pakDir) : PAK_DIR
 
 	try {
 		const st = await fsp.stat(inputResolved)
@@ -432,9 +443,9 @@ export async function extractFolder(
 		throw new Error(`Input folder not found: ${inputResolved}`)
 	}
 
-	await ensureDir(UNPAKED_DIR)
+	await ensureDir(unpakedRoot)
 
-	const pakResolved = path.resolve(PAK_DIR)
+	const pakResolved = pakRoot
 	const underFiles = isSubPath(pakResolved, inputResolved) || inputResolved === pakResolved
 	const relRoot = underFiles ? pakResolved : inputResolved
 	// Pak content and non-pak mirrors are rooted at `<basename(input)>/…` under
@@ -467,8 +478,8 @@ export async function extractFolder(
 		? allFiles.filter((p) => path.extname(p).toLowerCase() !== '.pak')
 		: []
 
-	const rootDbPath = unpakedRootDbForFolder(inputResolved)
-	const legacyRootDbPath = unpakedLegacyRootDbForFolder(inputResolved)
+	const rootDbPath = unpakedRootDbForFolder(inputResolved, unpakedRoot)
+	const legacyRootDbPath = unpakedLegacyRootDbForFolder(inputResolved, unpakedRoot)
 
 	const skippedExisting: string[] = []
 	let paksExtracted = 0
@@ -529,10 +540,10 @@ export async function extractFolder(
 		abortIfCanceled(options.signal)
 		const relPakPath = relToUnpaked(pakPath)
 		const destDir = posixDirname(relPakPath)
-		const destDirAbs = destDir === '' ? UNPAKED_DIR : path.join(UNPAKED_DIR, ...destDir.split('/'))
+		const destDirAbs = destDir === '' ? unpakedRoot : path.join(unpakedRoot, ...destDir.split('/'))
 		// Legacy wrapper from the previous model: `<name>.pak/` folder under the unpaked root.
 		const legacyRel = toPosix(path.relative(relRoot, pakPath))
-		const legacyWrapper = path.join(UNPAKED_DIR, ...legacyRel.split('/'))
+		const legacyWrapper = path.join(unpakedRoot, ...legacyRel.split('/'))
 		candidates.push({ pakPath, relPakPath, destDir, destDirAbs, legacyWrapper })
 		if (candidates.length % 20 === 0) await new Promise<void>((r) => setImmediate(r))
 	}
@@ -717,8 +728,8 @@ export async function extractFolder(
 		// (`relative(relRoot, input)` under the unpaked root), not just the basename.
 		const relRootToInput = path.relative(relRoot, inputResolved)
 		const extractionRoot = relRootToInput === ''
-			? UNPAKED_DIR
-			: path.join(UNPAKED_DIR, ...relRootToInput.split(/[\\/]/))
+			? unpakedRoot
+			: path.join(unpakedRoot, ...relRootToInput.split(/[\\/]/))
 		await removeLegacySiblingDbs(
 			extractionRoot,
 			rootDbPath,
@@ -739,7 +750,7 @@ export async function extractFolder(
 		async (filePath) => {
 			abortIfCanceled(options.signal)
 			const relPath = relToUnpaked(filePath)
-			const destPath = path.join(UNPAKED_DIR, ...relPath.split('/'))
+			const destPath = path.join(unpakedRoot, ...relPath.split('/'))
 			if (!payload.overwrite && (await existsAsync(destPath))) {
 				skippedExisting.push(relPath)
 				doneFiles += 1
@@ -759,7 +770,7 @@ export async function extractFolder(
 	onProgress?.({ stage: 'extract-folder-done', percent: 100 })
 
 	return {
-		outputFolder: UNPAKED_DIR,
+		outputFolder: unpakedRoot,
 		paksExtracted,
 		otherFilesCopied,
 		dbPaths,
@@ -835,16 +846,20 @@ export async function decryptTranslations(
 	return results
 }
 
-/** `/PAKS/unpaked/<rel>` (or `/PAKS/unpaked/<rel>.pak`) -> `/PAKS/repaked/<rel>[.pak]` without duplicating `.pak`. */
-function simpleRepakOutput(selectionAbs: string): string {
-	const unpakedResolved = path.resolve(UNPAKED_DIR)
+/** `<unpakedRoot>/<rel>` (or `<rel>.pak`) -> `<repakedRoot>/<rel>[.pak]` without duplicating `.pak`. */
+function simpleRepakOutput(
+	selectionAbs: string,
+	unpakedRoot: string = UNPAKED_DIR,
+	repakedRoot: string = REPAKED_DIR,
+): string {
+	const unpakedResolved = path.resolve(unpakedRoot)
 	const rel = isSubPath(unpakedResolved, selectionAbs)
 		? toPosix(path.relative(unpakedResolved, selectionAbs))
 		: path.basename(selectionAbs)
 	const parts = rel.split('/')
 	const last = parts[parts.length - 1] ?? ''
 	const normalizedLast = last.toLowerCase().endsWith('.pak') ? last : `${last}.pak`
-	return path.join(REPAKED_DIR, ...[...parts.slice(0, -1), normalizedLast])
+	return path.join(repakedRoot, ...[...parts.slice(0, -1), normalizedLast])
 }
 
 async function repackSimpleFolder(
@@ -855,8 +870,10 @@ async function repackSimpleFolder(
 	onProgress: ProgressCallback | undefined,
 	signal: AbortSignal | undefined,
 	repakPool: Piscina<RepakTaskInput, RepakTaskResult>,
+	unpakedRoot: string = UNPAKED_DIR,
+	repakedRoot: string = REPAKED_DIR,
 ): Promise<{ ok: boolean; entry?: unknown; failure?: unknown; doneStage: boolean }> {
-	const pakOutPath = simpleRepakOutput(selectionAbs)
+	const pakOutPath = simpleRepakOutput(selectionAbs, unpakedRoot, repakedRoot)
 	await ensureDir(path.dirname(pakOutPath))
 	const packageName = path.basename(pakOutPath)
 
@@ -868,9 +885,9 @@ async function repackSimpleFolder(
 		percent: 0,
 	})
 
-	// Staging outside source tree, under REPAKED_DIR, so source walk never sees it
+	// Staging outside source tree, under the repaked root, so source walk never sees it
 	const stagingRoot = path.join(
-		path.resolve(REPAKED_DIR),
+		path.resolve(repakedRoot),
 		'._tmp_repack',
 		`${Date.now()}-${Math.random().toString(16).slice(2)}`,
 	)
@@ -1000,7 +1017,9 @@ export async function repackTranslations(
 	const totalSelections = selectedTranslationPaths.length
 	if (totalSelections === 0) return results
 
-	await ensureDir(REPAKED_DIR)
+	const unpakedRoot = options.unpakedDir ? path.resolve(options.unpakedDir) : UNPAKED_DIR
+	const repakedRoot = options.repakedDir ? path.resolve(options.repakedDir) : REPAKED_DIR
+	await ensureDir(repakedRoot)
 
 	// Global percent across every PAK reconstructed by every selection. Coarse
 	// (advances per completed PAK) but spans the whole action, so the bar never
@@ -1009,7 +1028,7 @@ export async function repackTranslations(
 	for (const sel of selectedTranslationPaths) {
 		const abs = path.resolve(sel)
 		try {
-			const entries = await readAggregatedPakEntries(abs)
+			const entries = await readAggregatedPakEntries(abs, unpakedRoot)
 			if (entries && entries.length > 0) {
 				totalPaks += entries.length
 				continue
@@ -1075,12 +1094,12 @@ export async function repackTranslations(
 				// reconstruction from the `paks[]` manifest. Without it, legacy
 				// `*.pak/` wrapper trees (per-pak `<name>.pak.db` siblings) also
 				// reconstruct per-pak; any other folder is repacked as one simple pak.
-				const aggregatedEntries = await readAggregatedPakEntries(selectionAbs)
+				const aggregatedEntries = await readAggregatedPakEntries(selectionAbs, unpakedRoot)
 				const hasAggregateDb = aggregatedEntries !== null && aggregatedEntries.length > 0
 				const pakDirs = hasAggregateDb ? [] : await collectPakDirs(selectionAbs, options.signal)
 
 				if (!hasAggregateDb && pakDirs.length === 0) {
-					const r = await repackSimpleFolder(selectionAbs, folderName, folderIndex, totalSelections, wrapRepakProgress(), options.signal, repakPool!)
+					const r = await repackSimpleFolder(selectionAbs, folderName, folderIndex, totalSelections, wrapRepakProgress(), options.signal, repakPool!, unpakedRoot, repakedRoot)
 					paksCompleted += 1
 					if (r.ok && r.entry) localSuccess.push(r.entry)
 					else if (r.failure) localFailed.push(r.failure)
@@ -1140,7 +1159,7 @@ export async function repackTranslations(
 							continue
 						}
 
-						const pakOutPath = path.join(REPAKED_DIR, ...relPakPath.split('/'))
+						const pakOutPath = path.join(repakedRoot, ...relPakPath.split('/'))
 						await ensureDir(path.dirname(pakOutPath))
 						const packageName = path.basename(relPakPath)
 						onProgress?.({
@@ -1155,7 +1174,7 @@ export async function repackTranslations(
 						try {
 							// Stage outside the extract tree so cleanup never touches /PAKS/unpaked content.
 							const stagingRoot = path.join(
-								path.resolve(REPAKED_DIR),
+								path.resolve(repakedRoot),
 								'._tmp_repack',
 								`${Date.now()}-${Math.random().toString(16).slice(2)}`,
 							)
@@ -1235,20 +1254,20 @@ export async function repackTranslations(
 							: null
 						const metaRelPakPath = legacy && typeof legacy['relPakPath'] === 'string' && (legacy['relPakPath'] as string).length > 0
 							? toPosix(legacy['relPakPath'] as string)
-							: toPosix(path.relative(path.resolve(UNPAKED_DIR), pakDir))
+							: toPosix(path.relative(path.resolve(unpakedRoot), pakDir))
 
 						if (!metaFiles) {
 							localFailed.push({
 								folderName,
 								translationName: folderName,
 								pak: pakBase,
-								error: `DB not found for '${pakBase}'. Expected aggregate '${unpakedRootDbForFolder(selectionAbs)}' or legacy sibling '${unpakedLegacyRootDbForFolder(selectionAbs)}'.`,
+								error: `DB not found for '${pakBase}'. Expected aggregate '${unpakedRootDbForFolder(selectionAbs, unpakedRoot)}' or legacy sibling '${unpakedLegacyRootDbForFolder(selectionAbs, unpakedRoot)}'.`,
 							})
 							continue
 						}
 
 						const relPakPath = metaRelPakPath
-						const pakOutPath = path.join(REPAKED_DIR, ...relPakPath.split('/'))
+						const pakOutPath = path.join(repakedRoot, ...relPakPath.split('/'))
 						await ensureDir(path.dirname(pakOutPath))
 
 						const packageName = path.basename(relPakPath)
@@ -1264,7 +1283,7 @@ export async function repackTranslations(
 						try {
 							// Stage outside the extract tree so cleanup never touches /PAKS/unpaked content.
 							const stagingRoot = path.join(
-								path.resolve(REPAKED_DIR),
+								path.resolve(repakedRoot),
 								'._tmp_repack',
 								`${Date.now()}-${Math.random().toString(16).slice(2)}`,
 							)

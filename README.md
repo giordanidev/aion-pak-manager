@@ -5,7 +5,7 @@ rebuild (RePAK) packages without leaving the app. The whole pipeline — AION
 `pak2zip` decoding, XML/HTML decryption and PAK writing — is implemented in
 Node.js and shared with a headless CLI.
 
-![icon](frontend/assets/icon.svg)
+![icon](frontend/assets/icon.png)
 
 ## Features
 

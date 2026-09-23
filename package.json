@@ -91,7 +91,7 @@
 			"artifactName": "aion-pak-manager-${version}-portable-windows-${arch}.${ext}"
 		},
 		"linux": {
-			"icon": "build/icon.png",
+			"icon": "frontend/assets/icon.png",
 			"category": "Utility",
 			"maintainer": "Giordani.dev",
 			"executableName": "aion-pak-manager",

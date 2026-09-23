@@ -167,9 +167,9 @@ export function findRepakedPaks(dir: string = REPAKED_DIR): PakEntry[] {
 }
 
 /** Relative pak path mirrored under /PAKS/unpaked (posix separators), e.g. `data/data1/file1.pak`. */
-export function pakRelPathFromFiles(pakAbs: string): string {
+export function pakRelPathFromFiles(pakAbs: string, pakRoot: string = PAK_DIR): string {
 	const resolved = path.resolve(pakAbs)
-	const rel = path.isAbsolute(pakAbs) ? path.relative(PAK_DIR, resolved) : pakAbs
+	const rel = path.isAbsolute(pakAbs) ? path.relative(path.resolve(pakRoot), resolved) : pakAbs
 	// Pak from a custom source folder (outside /PAKS/pak): collapse to its
 	// basename so extract output stays under /PAKS/unpaked instead of escaping it.
 	if (rel.startsWith('..') || path.isAbsolute(rel)) {
@@ -178,41 +178,49 @@ export function pakRelPathFromFiles(pakAbs: string): string {
 	return rel.split(path.sep).join('/')
 }
 
-/** `PAKS/pak/.../name.pak` -> `<root>/PAKS/unpaked/.../name.pak` (folder keeps `.pak` name; folder-extract mode). */
-export function unpakedFolderForPak(pakAbs: string): string {
-	const rel = pakRelPathFromFiles(pakAbs)
-	return path.join(UNPAKED_DIR, ...rel.split('/'))
+/** `PAKS/pak/.../name.pak` -> `<unpakedRoot>/.../name.pak` (folder keeps `.pak` name; folder-extract mode). */
+export function unpakedFolderForPak(
+	pakAbs: string,
+	unpakedRoot: string = UNPAKED_DIR,
+	pakRoot: string = PAK_DIR,
+): string {
+	const rel = pakRelPathFromFiles(pakAbs, pakRoot)
+	return path.join(unpakedRoot, ...rel.split('/'))
 }
 
 /**
- * Individual UnPAK output: `PAKS/pak/.../name.pak` -> `PAKS/unpaked/.../name`
+ * Individual UnPAK output: `PAKS/pak/.../name.pak` -> `<unpakedRoot>/.../name`
  * (no `.pak` suffix on the last segment; intermediate folders mirrored).
  */
-export function unpakedSingleFolderForPak(pakAbs: string): string {
-	const rel = pakRelPathFromFiles(pakAbs)
+export function unpakedSingleFolderForPak(
+	pakAbs: string,
+	unpakedRoot: string = UNPAKED_DIR,
+	pakRoot: string = PAK_DIR,
+): string {
+	const rel = pakRelPathFromFiles(pakAbs, pakRoot)
 	const parts = rel.split('/')
 	const last = parts[parts.length - 1] ?? ''
 	const base = last.toLowerCase().endsWith('.pak') ? last.slice(0, -4) : last
 	const normalized = [...parts.slice(0, -1), base].filter((p) => p.length > 0)
-	return path.join(UNPAKED_DIR, ...normalized)
+	return path.join(unpakedRoot, ...normalized)
 }
 
 /**
  * Aggregate DB for a full-folder extract, stored **inside** the extracted
- * folder: `PAKS/unpaked/<folder-name>/<folder-name>.db`.
+ * folder: `<unpakedRoot>/<folder-name>/<folder-name>.db`.
  */
-export function unpakedRootDbForFolder(folderAbs: string): string {
+export function unpakedRootDbForFolder(folderAbs: string, unpakedRoot: string = UNPAKED_DIR): string {
 	const base = path.basename(path.resolve(folderAbs))
-	return path.join(UNPAKED_DIR, base, `${base}.db`)
+	return path.join(unpakedRoot, base, `${base}.db`)
 }
 
 /**
  * Legacy aggregate DB location, next to (outside) the extracted folder:
- * `PAKS/unpaked/<folder-name>.db`. Read-only fallback for extracts written by
+ * `<unpakedRoot>/<folder-name>.db`. Read-only fallback for extracts written by
  * older versions.
  */
-export function unpakedLegacyRootDbForFolder(folderAbs: string): string {
-	return path.join(UNPAKED_DIR, `${path.basename(path.resolve(folderAbs))}.db`)
+export function unpakedLegacyRootDbForFolder(folderAbs: string, unpakedRoot: string = UNPAKED_DIR): string {
+	return path.join(unpakedRoot, `${path.basename(path.resolve(folderAbs))}.db`)
 }
 
 /** Sibling DB of the extract folder: `.../name.pak` -> `.../name.pak.db` (legacy per-pak extracts). */

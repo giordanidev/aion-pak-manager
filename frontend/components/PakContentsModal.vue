@@ -514,8 +514,16 @@ async function unpakSelectedEntries(): Promise<void> {
   )
   try {
     const result = shouldDecrypt
-      ? await electron.unpakDecryptPakEntries(pakPath, entries, { showFileProgress: getShowFileNames() })
-      : await electron.unpakPakEntries(pakPath, entries, { showFileProgress: getShowFileNames() })
+      ? await electron.unpakDecryptPakEntries(pakPath, entries, {
+          showFileProgress: getShowFileNames(),
+          unpakedDir: state.customDirs.unpaked || undefined,
+          pakDir: state.customDirs.pak || undefined,
+        })
+      : await electron.unpakPakEntries(pakPath, entries, {
+          showFileProgress: getShowFileNames(),
+          unpakedDir: state.customDirs.unpaked || undefined,
+          pakDir: state.customDirs.pak || undefined,
+        })
     if (result.success) {
       const successCount = result.results?.success.length ?? 0
       const failedCount = result.results?.failed.length ?? 0

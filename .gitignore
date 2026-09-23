@@ -3,6 +3,7 @@ node_modules/
 release/
 .DS_Store
 settings.json
+.assets/
 
 # extracted / repacked data (managed at runtime under PAKS/)
 PAKS/*

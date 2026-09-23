@@ -119,6 +119,42 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === 'object' && value !== null
 }
 
+function readDirOverride(payload: unknown, key: string): string | undefined {
+	if (!isRecord(payload)) return undefined
+	const value = payload[key]
+	return typeof value === 'string' && value.trim().length > 0 ? path.resolve(value.trim()) : undefined
+}
+
+function customDirFromSettings(key: 'pak' | 'unpaked' | 'repaked'): string | undefined {
+	const value = loadSettings().customDirs?.[key]
+	return typeof value === 'string' && value.trim().length > 0 ? path.resolve(value.trim()) : undefined
+}
+
+/** Effective extraction output root: payload override > settings custom dir > /PAKS/unpaked. */
+function resolveUnpakedDir(payload: unknown): string {
+	return readDirOverride(payload, 'unpakedDir') ?? customDirFromSettings('unpaked') ?? UNPAKED_DIR
+}
+
+/** Effective RePAK output root: payload override > settings custom dir > /PAKS/repaked. */
+function resolveRepakedDir(payload: unknown): string {
+	return readDirOverride(payload, 'repakedDir') ?? customDirFromSettings('repaked') ?? REPAKED_DIR
+}
+
+/** Effective source PAK root: payload override > settings custom dir > /PAKS/pak. */
+function resolvePakDir(payload: unknown): string {
+	return readDirOverride(payload, 'pakDir') ?? customDirFromSettings('pak') ?? PAK_DIR
+}
+
+/** Custom dirs resolved from settings only (used to widen access checks). */
+function settingsCustomBases(): string[] {
+	const bases: string[] = []
+	for (const key of ['pak', 'unpaked', 'repaked'] as const) {
+		const dir = customDirFromSettings(key)
+		if (dir) bases.push(dir)
+	}
+	return bases
+}
+
 function extractPathsAndShowFileProgress(
 	payload: unknown,
 	pathsKey = 'paths',
@@ -201,8 +237,14 @@ async function runOperation(
 	}
 }
 
-function pakOptions(onProgress: ProgressCallback, signal: AbortSignal): PakServiceOptions {
-	return { onProgress, signal }
+function pakOptions(onProgress: ProgressCallback, signal: AbortSignal, payload?: unknown): PakServiceOptions {
+	return {
+		onProgress,
+		signal,
+		unpakedDir: readDirOverride(payload, 'unpakedDir'),
+		repakedDir: readDirOverride(payload, 'repakedDir'),
+		pakDir: readDirOverride(payload, 'pakDir'),
+	}
 }
 
 async function openFolder(dir: string): Promise<OperationResult> {
@@ -302,9 +344,10 @@ export function registerIpcHandlers(getMainWindow: GetMainWindow): void {
 		}
 	})
 
-	ipcMain.handle('list-pak-databases', async () => {
+	ipcMain.handle('list-pak-databases', async (_event, payload) => {
 		try {
-			const databases = await listPakDatabases(UNPAKED_DIR, ROOT_DIR)
+			const dir = readDirOverride(payload, 'unpakedDir') ?? customDirFromSettings('unpaked') ?? UNPAKED_DIR
+			const databases = await listPakDatabases(dir, ROOT_DIR)
 			return { success: true, databases }
 		} catch (error) {
 			return { success: false, error: errorMessage(error) }
@@ -318,8 +361,11 @@ export function registerIpcHandlers(getMainWindow: GetMainWindow): void {
 				: typeof payload === 'string' ? payload : ''
 			if (!dbPath) throw new Error('No database path provided')
 			const resolved = path.resolve(dbPath)
-			const base = path.resolve(UNPAKED_DIR)
-			if (resolved !== base && !resolved.startsWith(base + path.sep)) {
+			const allowedBases = [path.resolve(UNPAKED_DIR), ...settingsCustomBases()]
+			const payloadBase = readDirOverride(payload, 'base')
+			if (payloadBase) allowedBases.push(payloadBase)
+			const inside = allowedBases.some((base) => resolved === base || resolved.startsWith(base + path.sep))
+			if (!inside) {
 				throw new Error('Access denied: database path outside unpaked directory')
 			}
 			const raw = JSON.parse(await readFile(resolved, 'utf8')) as Record<string, unknown>
@@ -398,42 +444,42 @@ export function registerIpcHandlers(getMainWindow: GetMainWindow): void {
 	ipcMain.handle('unpak-packages', (_event, payload) => {
 		const { paths, showFileProgress } = extractPathsAndShowFileProgress(payload)
 		return runOperation(getMainWindow, showFileProgress, (onProgress, signal) =>
-			unpackPackages(paths, pakOptions(onProgress, signal)),
+			unpackPackages(paths, pakOptions(onProgress, signal, payload)),
 		)
 	})
 
 	ipcMain.handle('unpak-decrypt-packages', (_event, payload) => {
 		const { paths, showFileProgress } = extractPathsAndShowFileProgress(payload)
 		return runOperation(getMainWindow, showFileProgress, (onProgress, signal) =>
-			unpackAndDecryptPackages(paths, pakOptions(onProgress, signal)),
+			unpackAndDecryptPackages(paths, pakOptions(onProgress, signal, payload)),
 		)
 	})
 
 	ipcMain.handle('unpak-pak-entries', (_event, payload) => {
 		const { pakPath, entries, showFileProgress } = extractPakEntriesPayload(payload)
 		return runOperation(getMainWindow, showFileProgress, (onProgress, signal) =>
-			unpackPakEntries(pakPath, entries, pakOptions(onProgress, signal)),
+			unpackPakEntries(pakPath, entries, pakOptions(onProgress, signal, payload)),
 		)
 	})
 
 	ipcMain.handle('unpak-decrypt-pak-entries', (_event, payload) => {
 		const { pakPath, entries, showFileProgress } = extractPakEntriesPayload(payload)
 		return runOperation(getMainWindow, showFileProgress, (onProgress, signal) =>
-			unpackAndDecryptPakEntries(pakPath, entries, pakOptions(onProgress, signal)),
+			unpackAndDecryptPakEntries(pakPath, entries, pakOptions(onProgress, signal, payload)),
 		)
 	})
 
 	ipcMain.handle('decrypt-packages', (_event, payload) => {
 		const { paths, showFileProgress } = extractPathsAndShowFileProgress(payload)
 		return runOperation(getMainWindow, showFileProgress, (onProgress, signal) =>
-			decryptPackages(paths, pakOptions(onProgress, signal)),
+			decryptPackages(paths, pakOptions(onProgress, signal, payload)),
 		)
 	})
 
 	ipcMain.handle('repack-packages', (_event, payload) => {
 		const { paths, showFileProgress } = extractPathsAndShowFileProgress(payload)
 		return runOperation(getMainWindow, showFileProgress, (onProgress, signal) =>
-			repackPackages(paths, pakOptions(onProgress, signal)),
+			repackPackages(paths, pakOptions(onProgress, signal, payload)),
 		)
 	})
 
@@ -454,7 +500,13 @@ export function registerIpcHandlers(getMainWindow: GetMainWindow): void {
 					includeNonPak: isRecord(payload) && 'includeNonPak' in payload ? Boolean(payload.includeNonPak) : true,
 					overwrite: isRecord(payload) ? Boolean(payload.overwrite) : false,
 				},
-				{ onProgress, signal, onConflict: (request) => requestConflict(getMainWindow, request) },
+				{
+					onProgress,
+					signal,
+					onConflict: (request) => requestConflict(getMainWindow, request),
+					unpakedDir: resolveUnpakedDir(payload),
+					pakDir: resolvePakDir(payload),
+				},
 			)
 		})
 	})
@@ -494,7 +546,12 @@ export function registerIpcHandlers(getMainWindow: GetMainWindow): void {
 				? payload.showFileProgress
 				: true
 		return runOperation(getMainWindow, showFileProgress, (onProgress, signal) =>
-			repackTranslations(selectedFolderPaths, { onProgress, signal }),
+			repackTranslations(selectedFolderPaths, {
+				onProgress,
+				signal,
+				unpakedDir: resolveUnpakedDir(payload),
+				repakedDir: resolveRepakedDir(payload),
+			}),
 		)
 	})
 

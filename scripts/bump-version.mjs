@@ -42,4 +42,15 @@ try {
   // package-lock.json missing or unreadable: ignore, keep package.json as source of truth.
 }
 
+// Keep version.json (served as a release asset + CDN fallback) in sync.
+try {
+  const versionJson = {
+    version: next,
+    releaseUrl: 'https://github.com/giordanidev/aion-pak-manager/releases',
+  }
+  writeFileSync(resolve(process.cwd(), 'version.json'), `${JSON.stringify(versionJson, null, 2)}\n`)
+} catch {
+  // Non-fatal: package.json stays the source of truth.
+}
+
 console.log(`[bump] ${current} -> ${next} (commit ${commit})`)

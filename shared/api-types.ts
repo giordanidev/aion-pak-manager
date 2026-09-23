@@ -193,6 +193,10 @@ export interface ExtractFolderPayload {
 	includeNonPak?: boolean;
 	overwrite?: boolean;
 	showFileProgress?: boolean;
+	/** Extraction output root (custom "unpaked" folder); defaults to /PAKS/unpaked. */
+	unpakedDir?: string;
+	/** Source PAK root (custom "pak" folder); defaults to /PAKS/pak. */
+	pakDir?: string;
 }
 
 /** Answer to an interactive conflict prompt raised while un-paking a folder. */
@@ -225,6 +229,10 @@ export interface ResolveConflictResult {
 export interface RepackUnpakedPayload {
 	selectedFolderPaths: string[];
 	showFileProgress?: boolean;
+	/** RePAK output root (custom "repaked" folder); defaults to /PAKS/repaked. */
+	repakedDir?: string;
+	/** Source extraction root (custom "unpaked" folder); defaults to /PAKS/unpaked. */
+	unpakedDir?: string;
 }
 
 export interface AddFilesToPakPayload {
@@ -253,6 +261,10 @@ export interface DeletePakEntriesPayload {
 
 export interface ProgressOptions {
 	showFileProgress?: boolean;
+	/** Extraction output root (custom "unpaked" folder); defaults to /PAKS/unpaked. */
+	unpakedDir?: string;
+	/** Source PAK root (custom "pak" folder); defaults to /PAKS/pak. */
+	pakDir?: string;
 }
 
 export interface ElectronApi {
@@ -277,8 +289,8 @@ export interface ElectronApi {
 	openPakFolder(): Promise<OpenFolderResult>;
 	openUnpakedFolder(): Promise<OpenFolderResult>;
 	openFolder(dir: string): Promise<OpenFolderResult>;
-	listPakDatabases(): Promise<ListPakDatabasesResult>;
-	readPakDatabase(dbPath: string): Promise<ReadPakDatabaseResult>;
+	listPakDatabases(unpakedDir?: string): Promise<ListPakDatabasesResult>;
+	readPakDatabase(dbPath: string, base?: string): Promise<ReadPakDatabaseResult>;
 	getSettings(): Promise<SettingsResult>;
 	setSettings(partial: AppSettings): Promise<SettingsResult>;
 	checkUpdate(force?: boolean): Promise<CheckUpdateResult>;

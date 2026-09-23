@@ -115,6 +115,8 @@ async function repackSelectedUnpaked(): Promise<void> {
     const result = await electron.repackUnpaked({
       selectedFolderPaths: selected,
       showFileProgress: getShowFileNames(),
+      repakedDir: state.customDirs.repaked || undefined,
+      unpakedDir: state.customDirs.unpaked || undefined,
     })
     if (result.success) {
       const successCount = result.results?.success.length ?? 0
