@@ -16,8 +16,11 @@ Node.js and shared with a headless CLI.
   `.db`. Optional **UnPAK + Decrypt** does both in one pass.
 - **UnPAKEDS / RePAKEDS** — decrypt or RePAK selected extract folders, then open
   a rebuilt `.pak` (tree + search) and add, replace or delete entries **without
-  recompressing** the untouched data. Drop files from the OS straight onto the
-  viewer to add or replace them.
+  recompressing** the untouched data.
+- **Drag & drop into RePAKEDS** — drag files or folders from the OS onto the
+  rebuilt `.pak` tree (drop anywhere, or onto a specific folder to target it) to
+  add or replace entries in the RePAKEDS list; existing names prompt to
+  overwrite or skip.
 - **View PAK contents** — open a `.pak` and browse its file tree, with
   per-folder selection, before committing to an extraction.
 - **File structure** — browse the aggregate databases under `/PAKS/unpaked`.
