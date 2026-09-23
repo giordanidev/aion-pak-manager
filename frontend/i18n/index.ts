@@ -5,10 +5,9 @@ import enUS from './locales/en-US.json'
 import flagBR from '../assets/flags/br.svg'
 import flagES from '../assets/flags/es.svg'
 import flagUS from '../assets/flags/us.svg'
+import { DEFAULT_LOCALE, LOCALE_KEY, detectSystemLocale, isSupportedLocale, type SupportedLocale } from './locale'
 
-export const LOCALE_KEY = 'aion-locale'
-export const SUPPORTED_LOCALES = ['pt-BR', 'es-ES', 'en-US'] as const
-export type SupportedLocale = (typeof SUPPORTED_LOCALES)[number]
+export { LOCALE_KEY, SUPPORTED_LOCALES, type SupportedLocale } from './locale'
 
 export const LOCALE_FLAG_ICONS: Record<SupportedLocale, string> = {
   'pt-BR': flagBR,
@@ -25,13 +24,13 @@ export const LOCALE_LABELS: Record<SupportedLocale, string> = {
 export function getInitialLocale(): SupportedLocale {
 	try {
 		const saved = localStorage.getItem(LOCALE_KEY)
-		if (saved && (SUPPORTED_LOCALES as readonly string[]).includes(saved)) {
-			return saved as SupportedLocale
+		if (saved && isSupportedLocale(saved)) {
+			return saved
 		}
 	} catch {
 		// ignore
 	}
-	return 'pt-BR'
+	return detectSystemLocale() ?? DEFAULT_LOCALE
 }
 
 export const i18n = createI18n({

@@ -90,15 +90,12 @@ async function cancelCurrentAction(): Promise<void> {
         <span class="flex-none whitespace-nowrap text-[13px] font-bold tabular-nums text-bright [text-shadow:0_1px_2px_rgba(0,0,0,0.6)]">{{ percentText }}</span>
       </div>
     </div>
-    <div class="flex flex-none flex-wrap items-center justify-between gap-3">
-      <div class="flex flex-none items-center gap-1.5 whitespace-nowrap text-xs text-dim">
-        <span>{{ t('progress.elapsed', { value: elapsedText }) }}</span>
-        <span class="opacity-60">·</span>
-        <span>{{ t('progress.remaining', { value: remainingText }) }}</span>
-        <span class="opacity-60">·</span>
-        <span>{{ t('progress.speed', { value: speedText }) }}</span>
-        <span class="opacity-60">·</span>
-        <span>{{ t('progress.total', { value: totalText }) }}</span>
+    <div class="flex flex-none items-center justify-between gap-3">
+      <div class="grid min-w-0 flex-1 grid-cols-2 gap-x-4 text-xs leading-4 text-dim">
+        <span class="min-w-0 truncate">{{ t('progress.elapsed', { value: elapsedText }) }}</span>
+        <span class="min-w-0 truncate">{{ t('progress.speed', { value: speedText }) }}</span>
+        <span class="min-w-0 truncate">{{ t('progress.remaining', { value: remainingText }) }}</span>
+        <span class="min-w-0 truncate">{{ t('progress.total', { value: totalText }) }}</span>
       </div>
       <button
         class="box-border inline-flex h-9 items-center justify-center rounded-lg bg-red px-4 py-2 text-sm text-white cursor-pointer transition duration-150 enabled:hover:bg-[#f87171] disabled:cursor-not-allowed disabled:opacity-50"

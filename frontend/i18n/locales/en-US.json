@@ -116,7 +116,7 @@
   "unpaked": {
     "title": "UnPAKEDS:",
     "sub": "Folders in {unpakedDir} for Decrypt/RePAK. UnPAK creates folders without .pak; RePAK/Reconstruct writes to {repakedDir}.",
-    "empty": "No folders found in /PAKS/unpaked.",
+    "empty": "No folders found in {dir}.",
     "openUnpakeds": "UnPAKEDS",
     "openUnpakedsHint": "Open the UnPAKEDS files folder in the system.",
     "decrypt": "Decrypt",
@@ -140,7 +140,7 @@
     "repakFailTitle": "RePAK failed",
     "openRepaksFail": "Could not open RePAKs folder: {error}",
     "repakedSub": "Rebuilt PAKs in {repakedDir}. Drag files from the OS into the viewer to add or replace them without rebuilding the whole pak.",
-    "emptyRepaked": "No .pak files found in /PAKS/repaked.",
+    "emptyRepaked": "No .pak files found in {dir}.",
     "dbStructureHint": "Full folder extracted. Click to view the PAKs reconstruction structure."
   },
   "progress": {

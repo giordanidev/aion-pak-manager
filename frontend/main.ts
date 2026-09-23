@@ -1,6 +1,6 @@
 import './assets/app.css'
+import { LOCALE_KEY, detectSystemLocale } from './i18n/locale'
 
-const LOCALE_KEY = 'aion-locale'
 const SHOW_FILE_NAMES_KEY = 'aion-show-file-names'
 const DIR_KEYS = { pak: 'aion-dir-pak', unpaked: 'aion-dir-unpaked', repaked: 'aion-dir-repaked' } as const
 
@@ -11,6 +11,13 @@ async function seedFromSettings(): Promise<void> {
     if (!result?.success || !settings) return
     if (typeof settings.locale === 'string') {
       localStorage.setItem(LOCALE_KEY, settings.locale)
+    } else {
+      // First run: pick the closest supported locale from the OS language and persist it.
+      const detected = detectSystemLocale()
+      if (detected) {
+        localStorage.setItem(LOCALE_KEY, detected)
+        void window.electronAPI?.setSettings({ locale: detected })
+      }
     }
     if (typeof settings.showFileNames === 'boolean') {
       localStorage.setItem(SHOW_FILE_NAMES_KEY, settings.showFileNames ? '1' : '0')

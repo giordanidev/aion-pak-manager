@@ -116,7 +116,7 @@
   "unpaked": {
     "title": "UnPAKEDS:",
     "sub": "Pastas em {unpakedDir} para Decrypt/RePAK. UnPAK gera pastas sem .pak; RePAK/Reconstruct grava em {repakedDir}.",
-    "empty": "Nenhuma pasta encontrada em /PAKS/unpaked.",
+    "empty": "Nenhuma pasta encontrada em {dir}.",
     "openUnpakeds": "UnPAKEDS",
     "openUnpakedsHint": "Abrir pasta dos arquivos UnPAKEDS no sistema.",
     "decrypt": "Decrypt",
@@ -140,7 +140,7 @@
     "repakFailTitle": "Falha no RePAK",
     "openRepaksFail": "Não foi possível abrir a pasta de RePAKs: {error}",
     "repakedSub": "PAKs reconstruídos em {repakedDir}. Arraste arquivos do sistema para dentro da visualização para adicioná-los ou substituí-los sem recriar o pak inteiro.",
-    "emptyRepaked": "Nenhum arquivo .pak encontrado em /PAKS/repaked.",
+    "emptyRepaked": "Nenhum arquivo .pak encontrado em {dir}.",
     "dbStructureHint": "Pasta inteira extraída. Clique para visualizar a estrutura de reconstrução de PAKS."
   },
   "progress": {

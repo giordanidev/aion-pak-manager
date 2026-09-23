@@ -8,6 +8,13 @@ import { ensureDataDirs } from './services/paths'
 import { loadSettings, saveSettings } from './services/settings'
 import { runCli } from './cli/run'
 
+// Development and the packaged app would otherwise share the same Chromium
+// cache directory under userData; two processes racing on it produce
+// "Unable to move the cache / Unable to create cache" errors. Give dev its own.
+if (!app.isPackaged) {
+	app.setPath('userData', join(app.getPath('appData'), `${app.getName()}-dev`))
+}
+
 let mainWindow: BrowserWindow | null = null
 
 function devIconPath(): string | undefined {
@@ -110,7 +117,15 @@ if (cliArgs) {
 		const code = await runCli(cliArgs)
 		app.exit(code)
 	})
+} else if (!app.requestSingleInstanceLock()) {
+	app.quit()
 } else {
+	app.on('second-instance', () => {
+		if (!mainWindow) return
+		if (mainWindow.isMinimized()) mainWindow.restore()
+		mainWindow.show()
+		mainWindow.focus()
+	})
 	app.whenReady().then(() => {
 		ensureDataDirs()
 		registerIpcHandlers(() => mainWindow)

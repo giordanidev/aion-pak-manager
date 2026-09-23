@@ -231,7 +231,7 @@ async function unpackSelected(): Promise<void> {
     <div class="mb-2.5 min-h-0 flex-1 overflow-x-hidden overflow-y-auto rounded-lg border border-border bg-deepest">
       <div v-if="state.pakScanFailed"></div>
       <div v-else-if="state.pakLoaded && entries.length === 0" class="flex items-center justify-between gap-3 border-b border-border px-3 py-1.5 text-orange">
-        {{ t('pak.emptyEntries', { pakDir: '/PAKS/pak' }) }}
+        {{ t('pak.emptyEntries', { pakDir }) }}
       </div>
       <TransitionGroup v-else-if="state.pakLoaded" name="list" tag="div" class="relative">
         <div v-for="entry in entries" :key="entry.fullPath" class="flex items-center justify-between gap-3 border-b border-border px-3 py-1.5 last:border-b-0 hover:bg-hover">

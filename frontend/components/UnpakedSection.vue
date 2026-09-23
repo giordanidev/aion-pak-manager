@@ -265,7 +265,7 @@ async function resetActiveFolder(): Promise<void> {
       <div v-if="activeTab === 'unpaked'" class="mb-2.5 min-h-0 flex-1 overflow-x-hidden overflow-y-auto rounded-lg border border-border bg-deepest">
         <div v-if="state.trScanFailed"></div>
         <div v-else-if="state.trLoaded && state.unpakedFolders.length === 0" class="flex items-center justify-between gap-3 border-b border-border px-3 py-1.5 text-orange">
-          {{ t('unpaked.empty') }}
+          {{ t('unpaked.empty', { dir: activeDir }) }}
         </div>
         <TransitionGroup v-else-if="state.trLoaded" name="list" tag="div" class="relative">
           <div v-for="folder in state.unpakedFolders" :key="folder.fullPath" class="flex items-center justify-between gap-3 border-b border-border px-3 py-1.5 last:border-b-0 hover:bg-hover">
@@ -316,7 +316,7 @@ async function resetActiveFolder(): Promise<void> {
       <div v-else class="min-h-0 flex-1 overflow-x-hidden overflow-y-auto rounded-lg border border-border bg-deepest">
         <div v-if="state.trScanFailed"></div>
         <div v-else-if="state.trLoaded && state.repakedFiles.length === 0" class="flex items-center justify-between gap-3 border-b border-border px-3 py-1.5 text-orange">
-          {{ t('unpaked.emptyRepaked') }}
+          {{ t('unpaked.emptyRepaked', { dir: activeDir }) }}
         </div>
         <TransitionGroup v-else-if="state.trLoaded" name="list" tag="div" class="relative">
           <div v-for="pak in state.repakedFiles" :key="pak.fullPath" class="flex items-center justify-between gap-3 border-b border-border px-3 py-1.5 last:border-b-0 hover:bg-hover">
