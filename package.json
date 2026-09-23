@@ -1,6 +1,6 @@
 {
 	"name": "aion-pak-manager",
-	"version": "0.0.82",
+	"version": "0.0.83",
 	"description": "Native AION PAK extraction in Node.js using AION pak2zip format decoding.",
 	"main": ".build/backend/index.js",
 	"scripts": {
