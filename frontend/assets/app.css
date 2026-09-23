@@ -1,0 +1,82 @@
+@import 'tailwindcss';
+
+@theme {
+	--font-sans: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+	--font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
+
+	--color-deepest: #080a0f;
+	--color-bg: #0d0f14;
+	--color-card: #13161d;
+	--color-hover: #1a1e28;
+	--color-border: #1f2331;
+	--color-text: #c8cdd8;
+	--color-dim: #6b7280;
+	--color-bright: #e8ecf4;
+	--color-accent: #4f8fff;
+	--color-accent-hover: #6ba1ff;
+	--color-green: #34d399;
+	--color-orange: #f59e0b;
+	--color-red: #ef4444;
+}
+
+@layer base {
+	html,
+	body {
+		height: 100%;
+		margin: 0;
+		overflow: hidden;
+	}
+
+	body {
+		background-color: var(--color-bg);
+		color: var(--color-text);
+		font-family: var(--font-sans);
+	}
+
+	#app {
+		height: 100%;
+		min-height: 0;
+	}
+}
+
+/* Slim scrollbars, shared by every scrollable surface. */
+* {
+	scrollbar-width: thin;
+	scrollbar-color: #4b5568 var(--color-deepest);
+}
+
+::-webkit-scrollbar {
+	width: 8px;
+	height: 8px;
+}
+
+::-webkit-scrollbar-track {
+	background: var(--color-deepest);
+}
+
+::-webkit-scrollbar-thumb {
+	background: #4b5568;
+	border-radius: 8px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+	background: var(--color-accent);
+}
+
+/* Vue <TransitionGroup name="list"> hooks (cannot be expressed as utilities). */
+.list-move,
+.list-enter-active,
+.list-leave-active {
+	transition: opacity 0.25s ease, transform 0.25s ease;
+}
+
+.list-enter-from,
+.list-leave-to {
+	opacity: 0;
+	transform: translateY(-6px);
+}
+
+.list-leave-active {
+	position: absolute;
+	width: 100%;
+}

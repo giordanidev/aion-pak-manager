@@ -1,0 +1,21 @@
+node_modules/
+.build/
+release/
+.DS_Store
+settings.json
+
+# extracted / repacked data (managed at runtime under PAKS/)
+PAKS/*
+files/*
+unpaked/*
+repaked/*
+repak/*
+translation/*
+
+# tooling / editor
+.vscode/
+.cursor/
+.orchestrate
+
+# temporary test artifacts
+tmp_*

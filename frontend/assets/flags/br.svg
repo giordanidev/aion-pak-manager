@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 14" width="20" height="14" role="img" aria-label="Brasil">
+  <defs>
+    <clipPath id="flag-br-clip"><rect width="20" height="14" rx="2" /></clipPath>
+  </defs>
+  <g clip-path="url(#flag-br-clip)">
+    <rect width="20" height="14" fill="#009b3a" />
+    <polygon points="10,1.5 18.3,7 10,12.5 1.7,7" fill="#fedf00" />
+    <circle cx="10" cy="7" r="3.1" fill="#002776" />
+    <path d="M7.4 6.3c1.7 1.5 3.6 1.9 5.5 1.1" stroke="#fff" stroke-width="0.9" fill="none" stroke-linecap="round" />
+  </g>
+</svg>

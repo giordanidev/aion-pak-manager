@@ -1,0 +1,137 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Generate icons
+        run: npm run icon
+
+      - name: Build app bundle
+        run: npm run build:app
+
+      - name: Package (setup + portable)
+        run: npx electron-builder --win --publish never
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: aion-pak-manager-windows
+          if-no-files-found: ignore
+          path: |
+            release/*.exe
+            release/*.blockmap
+            release/latest*.yml
+
+      - name: Publish to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          fail_on_unmatched_files: false
+          files: |
+            release/*.exe
+            release/*.blockmap
+            release/latest*.yml
+
+  linux-ubuntu:
+    runs-on: ubuntu-latest
+    env:
+      LINUX_FLAVOR: linux-ubuntu
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Generate icons
+        run: npm run icon
+
+      - name: Build app bundle
+        run: npm run build:app
+
+      - name: Package (portable AppImage + .deb)
+        run: npx electron-builder --linux AppImage deb --publish never
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: aion-pak-manager-linux-ubuntu
+          if-no-files-found: ignore
+          path: |
+            release/*.AppImage
+            release/*.deb
+            release/*.blockmap
+            release/latest*.yml
+
+      - name: Publish to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          fail_on_unmatched_files: false
+          files: |
+            release/*.AppImage
+            release/*.deb
+            release/*.blockmap
+            release/latest*.yml
+
+  linux-fedora:
+    runs-on: ubuntu-latest
+    container: fedora:latest
+    env:
+      LINUX_FLAVOR: linux-fedora
+    steps:
+      - name: Install toolchain
+        run: dnf install -y nodejs npm git tar xz which findutils
+
+      - uses: actions/checkout@v4
+
+      - run: npm ci
+
+      - name: Generate icons
+        run: npm run icon
+
+      - name: Build app bundle
+        run: npm run build:app
+
+      - name: Package (.rpm)
+        run: npx electron-builder --linux rpm --publish never
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: aion-pak-manager-linux-fedora
+          if-no-files-found: ignore
+          path: |
+            release/*.rpm
+            release/latest*.yml
+
+      - name: Publish to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          fail_on_unmatched_files: false
+          files: |
+            release/*.rpm
+            release/latest*.yml

@@ -1,0 +1,80 @@
+// Shared AION pak codec primitives (XOR tables + CRC32).
+// Used by both core/unpak.ts (reader) and core/repak.ts (writer) — single source.
+
+export const TABLE1 = Buffer.from(
+	'2f5d51f701e9b4934e51813eaf3fdf99805e13839b4657b51b5cecb1297ca93168e5daa7f64fae169a7f03cf1d5ed0515ae502d911d0fbf4f87ca28826d81fa2' +
+	'43da33a9ac4e5a0ded78862db26ac49baa7785576aa6d835d8976b1724b77a1dd33b9e79f2ae9f01e69d2940ed2f9c16da18d1990ed40a632d92d7ebb4a75021' +
+	'd80f45d6c6bfcc47cc59ed3e71fea026fcd107858aee1236115a60e18fbd9ef7b66439cd495a9af7901cc1a20bb381f7cab82a4b9513dc2e4ae564169499c9b1' +
+	'7b5376aec4df26f7c85f7831aeaf5a7fa4e7295e0ee2bb9141322cf0ce609e27dcfadc13ac37f7f1b4a4cdf47adca97b9582da7dfb8d6b6e0c43e7236cc053f9' +
+	'398238de9bd0fe573d756543b0ae5a6e4eb3fbae8cc40f9b6527afa2c6f18491941a393953a59064f062ccb5bf1ebca728ae333f16c630b7b1f283b15eb03720' +
+	'9df77b95be356e1b070577323aae8a3925af10c51856c22bf9c44bd6dc44d79da85c7fadef88bc465ffec0e3de69e303edf8061f38c12223f4c1d7e1117b3ccb' +
+	'b48daf8223300d7882f9ed3e91e152a7d5d5757146da1197fb16dfeaf3aba03266db5e5eb943550e9ea52afd5e31c693d49aa22b3700b94613f70551a7b2aa22' +
+	'0c9dc5d23d62f4288cbc892579fa9afd8da1bc022b15b0b6e6a4cdbc72f868b49a3308ba62b7b1b1ca00080140688ee1494fd8f26785f037c961ab1ec66a4dca' +
+	'af032f3602f0bc5e81398a25382cca04f90df6445b46dbdeb77bf4ac3b7f360d907c2cb02048aba97f39db6d0b80e2f13750fa839dd33e8c5448ebe792346aeb' +
+	'2b18dadae57c7ed33dd9b1fd9028cd004593b386eb324be6ea24b697b41194a01653fbaea6d79ae9d9fba641c26dec4b0b59d76c2eec9b5d6f7666cbb023ca2c' +
+	'8db63a6edc29d1bd1d893febc72209b81d2e0498711a35267daaf2dbc0018a5676d127a32bc858ea7672e6f9eaa054f4b2a4c0bbec54813f58373c6945c8b7b1' +
+	'603b3d205b97ced2fcb1f2afa2cb6774ad5879c8fec15471ea980b59c621a0947f91defd61fc3ca171479f97890d437497ec85fe2e0de749ca550eddf438f822' +
+	'b17e559e56ea0f4a3a3d0f86645751f9a30c23e42a6adf2031f8dd6da8c4df427daed2ac7dd71f8567a44f97212561d0a96b7747c7974713031afac8e205d7a6' +
+	'0eda711842c5aad8b096532fd378ad8f2bc4913b07d79009cb55ccf7ccbdcfc53bc1341d353c598d7535f7f7b7dbd69053db66200ef798b0bd51a449b43f1de2' +
+	'822b043c134b39b6bda800e73360e5faf17bd59b2b4c9f81b6b9b855165f7a0507e6b33ebc8bc32f37231939d1a24cba8178a399d3b053b938442bfc8f7b0ffe' +
+	'99cafb373e1dd4993cddd56f48c2e18323ab7f52a989c4616fae0266e97a6767adb7807fc8a8b561c91ab357736ce9d3a0fafe4370c371462ebe2e0217ca78a0',
+	'hex',
+);
+
+export const TABLE2 = Buffer.from(
+	'86fa1a1c07bdd864ceee5988cda91d06f73d315883a15c7edfa6509e89a812d2254975e2070feb01974a6635ab329da74ea289620f5541c552101f47b0a063a6' +
+	'f01c1c4c9b3cace2b34e9ff1a4912982e4760d8d4fa3344acc1cc718488efe18790887288e24b76b38f258012da8580e9c5429cfa1ae0ad23b4a10f8d819317d' +
+	'f3ae1b90d22f16c7e53bccefe1e12c8600dd35678d25fced321fa91a126db0f73db61fe8814d36e72530219086300eee40be6edac13aaff2ec282cf1cd449872' +
+	'dacdc6d9dff7ee8804e16200080ecd1637abf9f514aa2e004ef818410bd96f9bfaad2b54562e7f2c3b6a82a17c7ca68f665ee7cf83b9eafce231d410f3f422ec' +
+	'73144f9478798f1e29ea5f211e0837b8f69a2dc53634c197dc75b2add7e304a7c0c91c1a00e92d6fd68dbc7352c08ab6ba2ca67d7b6ff4471a72e9b2307dd4d3' +
+	'099c65b0d017cffcf2ff46d2a64311762be51de5c9472f4b1bdd9afd9d20b6431a64e368f3215768d4048fc3ceafa3ab69a33c34be1f84a80e74cbb7e6b1398d' +
+	'68003a9b9cb1091c7d521512a6b083d340479be422e36e30c4fc6f4ffe9f51141357f1eb25f7954c92b63cd03479593320beb8bfe00ad277bc435c7dfce15900' +
+	'de5a7d4411ac13f264844f5da2c436d723faf8d1148df9dd171d524122f51a4239fe36d50a1001d2ea12825a48d294950af7ab70f7f29889a168f9e1d6e1bd92' +
+	'38455f19e2ea4676c5c3f2b49f7053093fb8063af346c86acd0ae3f0aa34d972983423d1968c32323b00a39e4fedbc97d44a2615961d0e36b8ee864557046d2b' +
+	'c0db910a46ce7c1f3c3a81942226826d83bd132d9691536c260c44febdeedaccbd52a6113e10422060eb5f5b0d7cbb80ac2fb9f9d24aeb5480606285e51af030' +
+	'45b74482ef3a0ce0e594fafd2ed9eb8d5ac2ef39517192fadbef148800ffe3f6b5343440f5bbc8d3b5bdf6cfc7b1f9183da274ef40bc6b39f2c86e0064785288' +
+	'13f42774148fce345ef9e06d47fc386db003ed6cf66800ac2bfe732c949e3f170c33b98f3334de0518e12bb9423f5fa2b41ee945f33843bb8eb00a9439eeff9a' +
+	'f42d6c4b66b11e0fc21832e174ff9094f238dd56dc789196d10403092139b2d4cc2aa8abe8991ce7e4433b58c15954e8bd9c28c681fcad334f2416a047d14c4d' +
+	'397ac1f71d04cfe7ae1771d937dc9c0a0e9d0e04d724c1500c49e3bcca9889558673f1c38d8f9934f74be7690ab0c12f8597bfc3fdd06275b1adf304f3f37706' +
+	'aa775ae7eb673fb540a19c5396fd85536eed52053b6e89ef9598b66634d08a3f44ea06861339ef20ade4732c6177103db90bc20cfdf299d8b157831b24a6a0ab' +
+	'973ee509073f43ed12e336ce1658f2780063f767dcd95f0daa3e9aa38372feba92e9d422f0383861e2799b5e8a6227598471c0eb95280d34cbab25c63bbc52a5' +
+	'ca6b93ca236d358741873e48b9df0efd30b8d1b810683dbc090431945c91af6c',
+	'hex',
+);
+
+const CRC32_TABLE = (() => {
+	const table = new Uint32Array(256);
+	for (let i = 0; i < 256; i++) {
+		let c = i;
+		for (let j = 0; j < 8; j++) {
+			c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+		}
+		table[i] = c >>> 0;
+	}
+	return table;
+})();
+
+// Signed 32-bit CRC, as stored in AION pak headers (read via readInt32LE).
+export function crc32(buffer: Buffer): number {
+	let crc = 0xffffffff;
+	for (const byte of buffer) {
+		crc = (crc >>> 8) ^ CRC32_TABLE[(crc ^ byte) & 0xff];
+	}
+	crc = (crc ^ 0xffffffff) >>> 0;
+	return crc > 0x7fffffff ? crc - 0x100000000 : crc;
+}
+
+// Unsigned 32-bit CRC, as stored in standard ZIP headers (read via readUInt32LE).
+export function crc32Unsigned(buffer: Buffer): number {
+	return crc32(buffer) >>> 0;
+}
+
+// XOR offset/table selection, mirroring unpak.ts detectVersion/extract:
+// version 1 -> TABLE1 @ (csize & 31) * 32, otherwise TABLE2 @ csize & 1023
+// (default version 0 -> table 2, like AIONencdec -e without -m 1).
+export function aionXorParams(version: number, csize: number): { table: Buffer; tbloff: number } {
+	if (version === 1) {
+		return { table: TABLE1, tbloff: (csize & 31) * 32 };
+	}
+	return { table: TABLE2, tbloff: csize & 1023 };
+}

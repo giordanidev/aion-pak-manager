@@ -1,0 +1,120 @@
+{
+	"name": "aion-pak-manager",
+	"version": "0.0.82",
+	"description": "Native AION PAK extraction in Node.js using AION pak2zip format decoding.",
+	"main": ".build/backend/index.js",
+	"scripts": {
+		"dev": "electron-vite dev",
+		"build": "node scripts/bump-version.mjs && electron-vite build",
+		"icon": "node scripts/make-icon.mjs",
+		"dist": "npm run icon && npm run build && electron-builder --win",
+		"dist:dir": "npm run icon && npm run build && electron-builder --win --dir",
+		"dist:linux": "bash scripts/linux/build.sh",
+		"dist:linux:appimage": "bash scripts/linux/build.sh --with-appimage",
+		"dist:linux:wsl": "node scripts/dist-linux-wsl.mjs all",
+		"dist:linux:wsl:ubuntu": "node scripts/dist-linux-wsl.mjs ubuntu",
+		"dist:linux:wsl:fedora": "node scripts/dist-linux-wsl.mjs fedora",
+		"build:app": "electron-vite build",
+		"preview": "electron-vite preview",
+		"cli": "node .build/backend/cli.js",
+		"unpak": "node .build/backend/cli.js unpak",
+		"repak": "node .build/backend/cli.js repak",
+		"precli": "node scripts/ensure-cli.mjs",
+		"preunpak": "node scripts/ensure-cli.mjs",
+		"prerepak": "node scripts/ensure-cli.mjs",
+		"typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
+		"typecheck:web": "vue-tsc --noEmit -p tsconfig.web.json --composite false",
+		"typecheck": "npm run typecheck:node && npm run typecheck:web"
+	},
+	"devDependencies": {
+		"@resvg/resvg-js": "^2.6.2",
+		"@tailwindcss/vite": "^4.3.3",
+		"@types/node": "^26.2.0",
+		"@vitejs/plugin-vue": "^6.0.8",
+		"electron": "^25.9.8",
+		"electron-builder": "^26.0.12",
+		"electron-vite": "^5.0.0",
+		"png-to-ico": "^3.0.2",
+		"pngjs": "^7.0.0",
+		"tailwindcss": "^4.3.3",
+		"typescript": "^5.9.3",
+		"vite": "^7.3.6",
+		"vue-tsc": "^3.3.10"
+	},
+	"keywords": [
+		"aion",
+		"pak",
+		"extract",
+		"pak2zip"
+	],
+	"author": "Giordani.dev",
+	"homepage": "https://github.com/giordanidev/aion-pak-manager",
+	"license": "MIT",
+	"build": {
+		"appId": "com.aion.pak-manager",
+		"productName": "Aion PAK Manager",
+		"copyright": "Copyright © Giordani.dev",
+		"directories": {
+			"output": "release"
+		},
+		"files": [
+			".build/**/*",
+			"package.json"
+		],
+		"asarUnpack": [
+			".build/backend/workers/**/*",
+			".build/backend/chunks/**/*"
+		],
+		"win": {
+			"icon": "build/icon.ico",
+			"executableName": "aion-pak-manager",
+			"target": [
+				"nsis",
+				"portable"
+			],
+			"extraFiles": [
+				{
+					"from": "build/aion-pak.cmd",
+					"to": "aion-pak.cmd"
+				}
+			]
+		},
+		"nsis": {
+			"artifactName": "aion-pak-manager-${version}-setup-windows-${arch}.${ext}",
+			"oneClick": false,
+			"allowToChangeInstallationDirectory": true,
+			"installerIcon": "build/icon.ico",
+			"uninstallerIcon": "build/icon.ico",
+			"installerHeaderIcon": "build/icon.ico"
+		},
+		"portable": {
+			"artifactName": "aion-pak-manager-${version}-portable-windows-${arch}.${ext}"
+		},
+		"linux": {
+			"icon": "build/icon.png",
+			"category": "Utility",
+			"maintainer": "Giordani.dev",
+			"executableName": "aion-pak-manager",
+			"target": [
+				"AppImage",
+				"deb",
+				"rpm"
+			]
+		},
+		"appImage": {
+			"artifactName": "aion-pak-manager-${version}-portable-linux-${arch}.${ext}"
+		},
+		"deb": {
+			"artifactName": "aion-pak-manager-${version}-setup-${env.LINUX_FLAVOR}-${arch}.${ext}"
+		},
+		"rpm": {
+			"artifactName": "aion-pak-manager-${version}-setup-${env.LINUX_FLAVOR}-${arch}.${ext}"
+		}
+	},
+	"dependencies": {
+		"pinia": "^4.0.3",
+		"piscina": "^4.9.3",
+		"vue": "^3.5.41",
+		"vue-i18n": "^9.14.5"
+	}
+}
