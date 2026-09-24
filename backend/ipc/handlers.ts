@@ -33,6 +33,7 @@ import {
 import { loadSettings, saveSettings } from '../services/settings'
 import { totalCpuThreads } from '../services/threads'
 import { checkForUpdates, RELEASES_URL } from '../services/update-check'
+import { downloadUpdate, getUpdateState, installUpdate, setUpdateStateSender } from '../services/updater'
 import {
 	createProgressSender,
 	errorMessage,
@@ -263,6 +264,11 @@ async function openFolder(dir: string): Promise<OperationResult> {
 }
 
 export function registerIpcHandlers(getMainWindow: GetMainWindow): void {
+	setUpdateStateSender((state) => {
+		const win = getMainWindow()
+		if (win && !win.isDestroyed()) win.webContents.send('app-update-state', state)
+	})
+
 	ipcMain.handle('scan-paks', async (_event, payload) => {
 		try {
 			const dir = isRecord(payload) && typeof payload.dir === 'string' && payload.dir.length > 0 ? payload.dir : PAK_DIR
@@ -665,6 +671,26 @@ export function registerIpcHandlers(getMainWindow: GetMainWindow): void {
 			return { success: true }
 		} catch (error) {
 			return { success: false, error: errorMessage(error) }
+		}
+	})
+
+	ipcMain.handle('update-get-state', async () => getUpdateState())
+
+	ipcMain.handle('update-download', async () => {
+		try {
+			const state = await downloadUpdate()
+			return { success: state.status !== 'error', state, error: state.error }
+		} catch (error) {
+			return { success: false, state: getUpdateState(), error: errorMessage(error) }
+		}
+	})
+
+	ipcMain.handle('update-install', async () => {
+		try {
+			installUpdate()
+			return { success: true, state: getUpdateState() }
+		} catch (error) {
+			return { success: false, state: getUpdateState(), error: errorMessage(error) }
 		}
 	})
 

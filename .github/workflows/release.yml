@@ -136,7 +136,8 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
+          # No channel file here: electron-updater on Linux only supports the
+          # AppImage channel, published by the ubuntu job as latest-linux.yml.
           fail_on_unmatched_files: false
           files: |
             release/*.rpm
-            release/latest*.yml

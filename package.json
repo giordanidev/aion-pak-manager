@@ -1,13 +1,13 @@
 {
 	"name": "aion-pak-manager",
-	"version": "0.0.83",
+	"version": "0.0.84",
 	"description": "Native AION PAK extraction in Node.js using AION pak2zip format decoding.",
 	"main": ".build/backend/index.js",
 	"scripts": {
 		"dev": "electron-vite dev",
 		"build": "node scripts/bump-version.mjs && electron-vite build",
 		"icon": "node scripts/make-icon.mjs",
-		"dist": "npm run icon && npm run build && electron-builder --win",
+		"dist": "npm run icon && npm run build && electron-builder --win --publish never",
 		"dist:dir": "npm run icon && npm run build && electron-builder --win --dir",
 		"dist:linux": "bash scripts/linux/build.sh",
 		"dist:linux:appimage": "bash scripts/linux/build.sh --with-appimage",
@@ -57,6 +57,13 @@
 		"directories": {
 			"output": "release"
 		},
+		"publish": [
+			{
+				"provider": "github",
+				"owner": "giordanidev",
+				"repo": "aion-pak-manager"
+			}
+		],
 		"files": [
 			".build/**/*",
 			"package.json"
@@ -112,6 +119,7 @@
 		}
 	},
 	"dependencies": {
+		"electron-updater": "^6.8.9",
 		"pinia": "^4.0.3",
 		"piscina": "^4.9.3",
 		"vue": "^3.5.41",

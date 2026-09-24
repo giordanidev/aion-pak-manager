@@ -1,18 +1,33 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import type { CheckUpdateResult, CpuEffort } from '../../shared/api-types'
+import type { CheckUpdateResult, CpuEffort, UpdateState } from '../../shared/api-types'
 import { useElectron } from '../composables/useElectron'
 
 const props = defineProps<{
   open: boolean
   updateInfo: CheckUpdateResult | null
+  updateState: UpdateState | null
   checking: boolean
 }>()
 const emit = defineEmits<{
   (e: 'close'): void
   (e: 'verify'): void
+  (e: 'download'): void
+  (e: 'install'): void
 }>()
+
+// Native auto-update is available only on NSIS/AppImage installs.
+const autoUpdateSupported = computed(() => !!props.updateState && props.updateState.status !== 'unsupported')
+const downloading = computed(() => props.updateState?.status === 'downloading')
+const downloaded = computed(() => props.updateState?.status === 'downloaded')
+const downloadPercent = computed(() => Math.max(0, Math.min(100, Math.round(props.updateState?.percent ?? 0))))
+const updateError = computed(() => (props.updateState?.status === 'error' ? props.updateState.error : ''))
+// The update button is always visible but only enabled once an update is found.
+const canUpdate = computed(
+  () => downloaded.value || (autoUpdateSupported.value && props.updateInfo?.updateAvailable === true),
+)
+const updateDisabled = computed(() => !canUpdate.value || downloading.value || props.checking)
 
 const { t } = useI18n()
 const electron = useElectron()
@@ -233,6 +248,24 @@ async function openReleases(): Promise<void> {
             }}</template>
             <template v-else>{{ t('settings.checkIdle') }}</template>
           </div>
+          <p v-if="downloading" class="m-0 text-xs text-dim">
+            {{ t('settings.downloading', { percent: downloadPercent }) }}
+          </p>
+          <div
+            v-if="downloading"
+            class="h-1.5 w-full overflow-hidden rounded-full bg-deepest"
+            role="progressbar"
+            :aria-valuenow="downloadPercent"
+            aria-valuemin="0"
+            aria-valuemax="100"
+          >
+            <div
+              class="h-full rounded-full bg-accent transition-[width] duration-200"
+              :style="{ width: downloadPercent + '%' }"
+            ></div>
+          </div>
+          <p v-if="downloaded" class="m-0 text-xs text-accent-hover">{{ t('settings.downloadComplete') }}</p>
+          <p v-else-if="updateError" class="m-0 text-xs break-all text-red">{{ updateError }}</p>
           <div class="flex flex-wrap items-center justify-end gap-2.5">
             <button
               class="box-border inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-border bg-hover px-4 text-sm text-text cursor-pointer transition duration-150 enabled:hover:bg-border"
@@ -241,7 +274,7 @@ async function openReleases(): Promise<void> {
               {{ t('settings.openReleases') }}
             </button>
             <button
-              class="box-border inline-flex h-9 items-center justify-center gap-2 rounded-lg bg-accent px-4 text-sm font-semibold text-white cursor-pointer transition duration-150 enabled:hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
+              class="box-border inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-border bg-hover px-4 text-sm text-text cursor-pointer transition duration-150 enabled:hover:bg-border disabled:cursor-not-allowed disabled:opacity-50"
               :disabled="checking"
               @click="emit('verify')"
             >
@@ -250,6 +283,17 @@ async function openReleases(): Promise<void> {
                 class="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/35 border-t-white"
               ></span>
               {{ t('settings.verify') }}
+            </button>
+            <button
+              class="box-border inline-flex h-9 items-center justify-center gap-2 rounded-lg bg-accent px-4 text-sm font-semibold text-white cursor-pointer transition duration-150 enabled:hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
+              :disabled="updateDisabled"
+              @click="downloaded ? emit('install') : emit('download')"
+            >
+              <span
+                v-if="downloading"
+                class="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/35 border-t-white"
+              ></span>
+              {{ downloaded ? t('settings.installRestart') : t('settings.downloadInstall') }}
             </button>
           </div>
         </div>

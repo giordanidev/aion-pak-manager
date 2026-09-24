@@ -77,6 +77,38 @@ export interface CheckUpdateResult {
 	error?: string;
 }
 
+/** Lifecycle of the native (electron-updater) auto-update flow. */
+export type UpdateStatus =
+	| 'idle'
+	| 'unsupported'
+	| 'checking'
+	| 'available'
+	| 'not-available'
+	| 'downloading'
+	| 'downloaded'
+	| 'error';
+
+export interface UpdateState {
+	status: UpdateStatus;
+	/** Version being downloaded / ready to install. */
+	version?: string;
+	/** Download progress 0-100. */
+	percent?: number;
+	/** Bytes already downloaded. */
+	transferred?: number;
+	/** Total download size in bytes. */
+	total?: number;
+	/** Current download speed in bytes/second. */
+	bytesPerSecond?: number;
+	error?: string;
+}
+
+export interface UpdateActionResult {
+	success: boolean;
+	state: UpdateState;
+	error?: string;
+}
+
 export interface ListPakDatabasesResult {
 	success: boolean;
 	databases: PakEntry[];
@@ -295,6 +327,10 @@ export interface ElectronApi {
 	setSettings(partial: AppSettings): Promise<SettingsResult>;
 	checkUpdate(force?: boolean): Promise<CheckUpdateResult>;
 	openReleases(): Promise<OpenFolderResult>;
+	getUpdateState(): Promise<UpdateState>;
+	downloadUpdate(): Promise<UpdateActionResult>;
+	installUpdate(): Promise<UpdateActionResult>;
+	onUpdateState(callback: (state: UpdateState) => void): void;
 	onProgress(callback: (progress: ProgressPayload) => void): void;
 	onConflict(callback: (request: ConflictRequest) => void): void;
 	resolveConflict(payload: ResolveConflictPayload): Promise<ResolveConflictResult>;

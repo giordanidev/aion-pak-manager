@@ -11,7 +11,7 @@ import AppTooltip from './components/AppTooltip.vue'
 import { useElectron } from './composables/useElectron'
 import { useAppState } from './composables/useAppState'
 import { LOCALE_FLAG_ICONS, LOCALE_LABELS, SUPPORTED_LOCALES, setLocale, getInitialLocale, type SupportedLocale } from './i18n'
-import type { CheckUpdateResult, ConflictChoice, ConflictRequest } from '../shared/api-types'
+import type { CheckUpdateResult, ConflictChoice, ConflictRequest, UpdateState } from '../shared/api-types'
 import appIcon from './assets/icon.svg'
 
 const { t, locale } = useI18n()
@@ -21,6 +21,7 @@ const { state, updateAppProgress, refreshLists } = useAppState()
 const settingsOpen = ref(false)
 const updateInfo = ref<CheckUpdateResult | null>(null)
 const updateChecking = ref(false)
+const updateState = ref<UpdateState | null>(null)
 const currentLocale = ref<SupportedLocale>(getInitialLocale())
 const langOpen = ref(false)
 const langPicker = ref<HTMLElement | null>(null)
@@ -97,6 +98,23 @@ async function runUpdateCheck(force = false): Promise<void> {
   }
 }
 
+async function downloadUpdate(): Promise<void> {
+  try {
+    const result = await electron.downloadUpdate()
+    updateState.value = result.state
+  } catch {
+    // state is pushed through onUpdateState; nothing to do here
+  }
+}
+
+async function installUpdate(): Promise<void> {
+  try {
+    await electron.installUpdate()
+  } catch {
+    // the app is about to quit for the install; ignore failures
+  }
+}
+
 onMounted(() => {
   ;(locale as unknown as { value: SupportedLocale }).value = currentLocale.value
   electron.onProgress((progress) => {
@@ -105,6 +123,17 @@ onMounted(() => {
     updateAppProgress(progress)
   })
   electron.onConflict(onConflict)
+  electron.onUpdateState((next) => {
+    updateState.value = next
+  })
+  void electron
+    .getUpdateState()
+    .then((next) => {
+      updateState.value = next
+    })
+    .catch(() => {
+      // ignore — the releases link stays available as a fallback
+    })
   refreshLists()
   void runUpdateCheck()
   document.addEventListener('pointerdown', onDocumentPointerDown)
@@ -238,9 +267,12 @@ onBeforeUnmount(() => {
     <SettingsModal
       :open="settingsOpen"
       :update-info="updateInfo"
+      :update-state="updateState"
       :checking="updateChecking"
       @close="settingsOpen = false"
       @verify="runUpdateCheck(true)"
+      @download="downloadUpdate"
+      @install="installUpdate"
     />
     <ConflictModal :request="conflictRequest" @choose="chooseConflict" />
     <AppTooltip />

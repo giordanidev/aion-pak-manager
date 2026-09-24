@@ -24,6 +24,8 @@ import type {
 	ScanUnpakedResult,
 	SelectFolderResult,
 	SettingsResult,
+	UpdateActionResult,
+	UpdateState,
 } from '../../shared/api-types'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -142,6 +144,18 @@ export function buildElectronApi(): ElectronApi {
 			ipcRenderer.invoke('check-update', toCloneable({ force: force === true })),
 
 		openReleases: (): Promise<OpenFolderResult> => ipcRenderer.invoke('open-releases'),
+
+		getUpdateState: (): Promise<UpdateState> => ipcRenderer.invoke('update-get-state'),
+
+		downloadUpdate: (): Promise<UpdateActionResult> => ipcRenderer.invoke('update-download'),
+
+		installUpdate: (): Promise<UpdateActionResult> => ipcRenderer.invoke('update-install'),
+
+		onUpdateState: (callback: (state: UpdateState) => void): void => {
+			ipcRenderer.on('app-update-state', (_event, state: UpdateState) => {
+				callback(state)
+			})
+		},
 
 		onProgress: (callback: (progress: ProgressPayload) => void): void => {
 			ipcRenderer.on('app-progress', (_event, progress: ProgressPayload) => {
