@@ -108,7 +108,9 @@ jobs:
       LINUX_FLAVOR: linux-fedora
     steps:
       - name: Install toolchain
-        run: dnf install -y nodejs npm git tar xz which findutils
+        # libxcrypt-compat provides libcrypt.so.1, required by the bundled
+        # ruby used by electron-builder's fpm to produce the .rpm.
+        run: dnf install -y nodejs npm git tar xz which findutils libxcrypt-compat
 
       - uses: actions/checkout@v4
 
