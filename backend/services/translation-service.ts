@@ -14,8 +14,8 @@ import {
 	unpakedRootDbForFolder,
 } from './paths'
 import { mapPool, cpuConcurrency } from './parallel'
-import { cpuThreadsForWork, innerConcurrency } from './threads'
-import { listFilesInPak } from '../core/unpak'
+import { cpuThreadsForWork, innerConcurrency, workerResourceLimits } from './threads'
+import { isExtractablePak, peekPakKind, scanPakEntries, type PakScanResult } from '../core/unpak'
 import type { UnpakTaskInput, UnpakTaskResult } from '../workers/unpak-task'
 import type { RepakTaskInput, RepakTaskResult } from '../workers/repak-task'
 import type { ConflictChoice, ExtractConflictRequest } from '../../shared/api-types'
@@ -37,6 +37,11 @@ export interface ExtractFolderPayload {
 	inputFolder: string;
 	includeNonPak: boolean;
 	overwrite: boolean;
+	/**
+	 * Nest each `.pak` under a stem-named folder (`…/name/`) instead of the
+	 * mirrored parent. Chromium packs always nest. Persisted via `destDir` in the DB.
+	 */
+	createPakFolder?: boolean;
 	/** Legacy (unused): kept so old payloads still typecheck. */
 	outputFolder?: string;
 	/** Legacy (unused): kept so old payloads still typecheck. */
@@ -49,8 +54,16 @@ export interface ExtractFolderResult {
 	outputFolder: string;
 	paksExtracted: number;
 	otherFilesCopied: number;
+	/** Files written from UnPAK (sum of TOC entries across successful paks). */
+	extractedFiles: number;
+	/** Bytes written while UnPAKing (compressed payload sizes reported as progress). */
+	extractedBytes: number;
+	/** Bytes copied for non-pak / non-AION mirrors. */
+	otherFilesBytes: number;
 	dbPaths: string[];
 	skippedExisting: string[];
+	/** Non-AION `.pak` (e.g. CEF) and extract failures that were skipped/copied. */
+	failedPaks?: { relPakPath: string; error: string }[];
 }
 
 export interface TranslationResults {
@@ -473,17 +486,46 @@ export async function extractFolder(
 			message: `Scanning... (${filesFound} files)`,
 		})
 	})
-	const pakFiles = allFiles.filter((p) => path.extname(p).toLowerCase() === '.pak')
-	const otherFiles = payload.includeNonPak
-		? allFiles.filter((p) => path.extname(p).toLowerCase() !== '.pak')
-		: []
+	// Only AION/ZIP PAKs are UnPAKed. Other `.pak` files (CEF/Chromium, etc.)
+	// share the extension but must be mirrored as ordinary files.
+	const pakFiles: string[] = []
+	const otherFiles: string[] = []
+	let classified = 0
+	for (const filePath of allFiles) {
+		abortIfCanceled(options.signal)
+		const ext = path.extname(filePath).toLowerCase()
+		if (ext === '.pak') {
+			if (isExtractablePak(filePath)) {
+				pakFiles.push(filePath)
+			} else if (payload.includeNonPak) {
+				otherFiles.push(filePath)
+			}
+		} else if (payload.includeNonPak) {
+			otherFiles.push(filePath)
+		}
+		classified += 1
+		if (classified % 64 === 0) {
+			await new Promise<void>((r) => setImmediate(r))
+			onProgress?.({
+				stage: 'extract-folder',
+				current: 0,
+				total: 0,
+				percent: 0,
+				message: `Classifying... (${classified}/${allFiles.length})`,
+			})
+		}
+	}
 
 	const rootDbPath = unpakedRootDbForFolder(inputResolved, unpakedRoot)
 	const legacyRootDbPath = unpakedLegacyRootDbForFolder(inputResolved, unpakedRoot)
 
 	const skippedExisting: string[] = []
+	const failedPaks: { relPakPath: string; error: string }[] = []
 	let paksExtracted = 0
 	let otherFilesCopied = 0
+	let extractedFiles = 0
+	let extractedBytes = 0
+	let otherFilesBytes = 0
 	// File-based global progress (extracted + copied + skipped files). The total
 	// is known once every PAK is scanned; until then `denomFiles` stays 1.
 	let doneFiles = 0
@@ -499,22 +541,36 @@ export async function extractFolder(
 		percent: number,
 		fileName: string,
 		message: string,
-		context: { packageName?: string; packageIndex?: number; packageTotal?: number; globalPercent?: boolean } = {},
+		context: {
+			packageName?: string
+			packageIndex?: number
+			packageTotal?: number
+			globalPercent?: boolean
+			bytesDelta?: number
+			current?: number
+			total?: number
+		} = {},
 	): void {
 		const clamped = Math.max(0, Math.min(percent, 100))
 		if (clamped > lastPercent) lastPercent = clamped
 		const value = Math.round(lastPercent * 10) / 10
+		const current = context.current ?? doneFiles
+		const total = context.total ?? denomFiles
 		onProgress?.(
 			{
 				stage,
-				current: doneFiles,
-				total: denomFiles,
+				current,
+				total,
 				percent: value,
 				fileName,
 				message,
-				...context,
+				packageName: context.packageName,
+				packageIndex: context.packageIndex,
+				packageTotal: context.packageTotal,
+				globalPercent: context.globalPercent,
+				bytesDelta: context.bytesDelta,
 			},
-			{ current: doneFiles, total: denomFiles },
+			{ current, total },
 		)
 	}
 
@@ -539,7 +595,14 @@ export async function extractFolder(
 	for (const pakPath of pakFiles) {
 		abortIfCanceled(options.signal)
 		const relPakPath = relToUnpaked(pakPath)
-		const destDir = posixDirname(relPakPath)
+		const parentDir = posixDirname(relPakPath)
+		// Nest under `<stem>/` when requested, or always for Chromium/CEF (bare
+		// numeric IDs would otherwise collide across sibling packs).
+		const stem = path.basename(pakPath, path.extname(pakPath))
+		const nestStem = payload.createPakFolder === true || peekPakKind(pakPath) === 'chromium'
+		const destDir = nestStem
+			? (parentDir === '' ? stem : `${parentDir}/${stem}`)
+			: parentDir
 		const destDirAbs = destDir === '' ? unpakedRoot : path.join(unpakedRoot, ...destDir.split('/'))
 		// Legacy wrapper from the previous model: `<name>.pak/` folder under the unpaked root.
 		const legacyRel = toPosix(path.relative(relRoot, pakPath))
@@ -565,34 +628,55 @@ export async function extractFolder(
 	const totalPaks = Math.max(candidates.length, 1)
 	let checkedPaks = 0
 	let wasCanceled = false
+	/** TOC + XOR version from the conflict/check pass — reused by parallel extract. */
+	const pakScans = new Map<string, PakScanResult>()
 	for (const candidate of candidates) {
 		abortIfCanceled(options.signal)
 		const isConflict = !payload.overwrite && byRelPakPath.has(candidate.relPakPath)
 		let accept = true
 		let files: string[] | null = null
-		if (isConflict && conflictMode === 'ask') {
-			conflictSeen += 1
-			files = await listFilesInPak(candidate.pakPath, () => options.signal?.aborted ?? false)
-			const choice = options.onConflict
-				? await options.onConflict({
-					packageName: path.basename(candidate.pakPath),
-					relPakPath: candidate.relPakPath,
-					fileCount: files.length,
-					conflictIndex: conflictSeen,
-					conflictTotal,
-				})
-				: 'skip'
-			if (choice === 'cancel') {
-				wasCanceled = true
-				break
+		try {
+			if (isConflict && conflictMode === 'ask') {
+				conflictSeen += 1
+				const scan = await scanPakEntries(candidate.pakPath, () => options.signal?.aborted ?? false)
+				pakScans.set(candidate.pakPath, scan)
+				files = scan.files
+				const choice = options.onConflict
+					? await options.onConflict({
+						packageName: path.basename(candidate.pakPath),
+						relPakPath: candidate.relPakPath,
+						fileCount: files.length,
+						conflictIndex: conflictSeen,
+						conflictTotal,
+					})
+					: 'skip'
+				if (choice === 'cancel') {
+					wasCanceled = true
+					break
+				}
+				if (choice === 'skip-all') { conflictMode = 'skip-all'; accept = false }
+				else if (choice === 'overwrite-all') { conflictMode = 'overwrite-all'; accept = true }
+				else accept = choice !== 'skip'
+			} else if (isConflict) {
+				accept = conflictMode === 'overwrite-all'
 			}
-			if (choice === 'skip-all') { conflictMode = 'skip-all'; accept = false }
-			else if (choice === 'overwrite-all') { conflictMode = 'overwrite-all'; accept = true }
-			else accept = choice !== 'skip'
-		} else if (isConflict) {
-			accept = conflictMode === 'overwrite-all'
+			if (!files) {
+				const scan = await scanPakEntries(candidate.pakPath, () => options.signal?.aborted ?? false)
+				pakScans.set(candidate.pakPath, scan)
+				files = scan.files
+			}
+		} catch (error) {
+			failedPaks.push({ relPakPath: candidate.relPakPath, error: errorMessage(error) })
+			checkedPaks += 1
+			emitProgress(
+				'extract-folder-check',
+				(checkedPaks / totalPaks) * VERIFY_SHARE,
+				'',
+				`Skipped ${candidate.relPakPath}`,
+				{ packageName: path.basename(candidate.pakPath), packageIndex: checkedPaks, packageTotal: candidates.length },
+			)
+			continue
 		}
-		if (!files) files = await listFilesInPak(candidate.pakPath, () => options.signal?.aborted ?? false)
 		if (accept) {
 			await ensureDir(candidate.destDirAbs)
 			jobs.push(candidate)
@@ -637,7 +721,11 @@ export async function extractFolder(
 	let unpakPool: Piscina<UnpakTaskInput, UnpakTaskResult> | null = null
 	if (jobs.length > 0) {
 		try {
-			unpakPool = new Piscina({ filename: resolveUnpakWorkerFile(), maxThreads: cpuThreadsForWork() })
+			unpakPool = new Piscina({
+				filename: resolveUnpakWorkerFile(),
+				maxThreads: cpuThreadsForWork(),
+				resourceLimits: workerResourceLimits(),
+			})
 		} catch (error) {
 			throw new Error(`UnPAK worker pool unavailable: ${errorMessage(error)}`)
 		}
@@ -662,22 +750,36 @@ export async function extractFolder(
 				cpuThreadsForWork(),
 				(payload) => {
 					if (payload.stage !== 'unpack') return
+					if (typeof payload.bytesDelta === 'number' && payload.bytesDelta > 0) {
+						extractedBytes += payload.bytesDelta
+					}
 					doneFiles = skippedFiles + (payload.current ?? 0)
 					emitProgress('unpack', extractionPercent(doneFiles), payload.fileName ?? '', '', {
 						packageName: payload.packageName,
 						packageIndex: payload.packageIndex,
 						packageTotal: payload.packageTotal,
 						globalPercent: true,
+						bytesDelta: payload.bytesDelta,
+						current: doneFiles,
+						total: denomFiles,
 					})
 				},
 				options.signal,
+				pakScans,
 			)
 			const byPak = new Map(jobs.map((j) => [j.pakPath, j]))
 			for (const outcome of outcomes) {
-				if (!outcome.ok) throw new Error(`UnPAK failed for '${outcome.job.packageName}': ${outcome.error ?? 'unknown error'}`)
 				const job = byPak.get(outcome.job.pakPath)
+				if (!outcome.ok) {
+					failedPaks.push({
+						relPakPath: job?.relPakPath ?? outcome.job.packageName,
+						error: outcome.error ?? 'unknown error',
+					})
+					continue
+				}
 				if (!job) continue
 				const files = outcome.files.slice().sort()
+				extractedFiles += files.length
 				extractedEntries.push({
 					relPakPath: job.relPakPath,
 					sourcePak: job.pakPath,
@@ -754,14 +856,30 @@ export async function extractFolder(
 			if (!payload.overwrite && (await existsAsync(destPath))) {
 				skippedExisting.push(relPath)
 				doneFiles += 1
-				emitProgress('extract-folder', extractionPercent(doneFiles), relPath, `Skipped (exists) ${relPath}`)
+				emitProgress('extract-folder', extractionPercent(doneFiles), relPath, `Skipped (exists) ${relPath}`, {
+					packageName: path.basename(filePath),
+					current: doneFiles,
+					total: denomFiles,
+				})
 				return
+			}
+			let bytesDelta = 0
+			try {
+				bytesDelta = (await fsp.stat(filePath)).size
+			} catch {
+				bytesDelta = 0
 			}
 			await ensureDir(path.dirname(destPath))
 			await fsp.copyFile(filePath, destPath)
 			otherFilesCopied += 1
+			if (bytesDelta > 0) otherFilesBytes += bytesDelta
 			doneFiles += 1
-			emitProgress('extract-folder', extractionPercent(doneFiles), relPath, `Copying ${relPath}`)
+			emitProgress('extract-folder', extractionPercent(doneFiles), relPath, `Copying ${relPath}`, {
+				packageName: path.basename(filePath),
+				bytesDelta: bytesDelta > 0 ? bytesDelta : undefined,
+				current: doneFiles,
+				total: denomFiles,
+			})
 		},
 		options.signal,
 	)
@@ -773,8 +891,12 @@ export async function extractFolder(
 		outputFolder: unpakedRoot,
 		paksExtracted,
 		otherFilesCopied,
+		extractedFiles,
+		extractedBytes,
+		otherFilesBytes,
 		dbPaths,
 		skippedExisting,
+		failedPaks,
 	}
 }
 
@@ -1055,7 +1177,11 @@ export async function repackTranslations(
 	let repakPool: Piscina<RepakTaskInput, RepakTaskResult> | null = null
 	try {
 		try {
-			repakPool = new Piscina({ filename: resolveRepakWorkerFile(), maxThreads: cpuThreadsForWork() })
+			repakPool = new Piscina({
+				filename: resolveRepakWorkerFile(),
+				maxThreads: cpuThreadsForWork(),
+				resourceLimits: workerResourceLimits(),
+			})
 		} catch (error) {
 			// 100% assíncrono: sem fallback síncrono no main. Falha estruturada por seleção.
 			const msg = `RePAK worker pool unavailable: ${errorMessage(error)}`

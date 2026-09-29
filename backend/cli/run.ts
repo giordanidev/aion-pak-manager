@@ -3,7 +3,7 @@
 // Runs the same core as the app (backend/core) without opening the GUI, so
 // UnPAK / RePAK / decrypt can be scripted. Used by the standalone entry
 // (backend/cli/index.ts -> .build/backend/cli.js) and by the packaged app when
-// launched as `<app>.exe cli <command>` (see backend/index.ts).
+// launched as `<app>.exe <command>` (see backend/index.ts).
 import { existsSync, readdirSync, statSync } from 'fs'
 import path from 'path'
 import { MessageChannel } from 'node:worker_threads'
@@ -18,7 +18,7 @@ import {
 } from '../services/decrypt-pool'
 import { mapPool } from '../services/parallel'
 import { loadSettings } from '../services/settings'
-import { cpuThreadsForWork, innerConcurrency, resolveCpuThreads, setThreadsOverride } from '../services/threads'
+import { cpuThreadsForWork, innerConcurrency, resolveCpuThreads, setThreadsOverride, workerResourceLimits } from '../services/threads'
 import { extractPaksParallel } from '../services/unpak-parallel'
 import type { RepakTaskInput, RepakTaskResult } from '../workers/repak-task'
 import type { UnpakTaskInput, UnpakTaskResult } from '../workers/unpak-task'
@@ -26,10 +26,10 @@ import type { UnpakTaskInput, UnpakTaskResult } from '../workers/unpak-task'
 const USAGE = `Aion PAK Manager CLI
 
 Usage:
-  cli unpak <pak|folder...> [-o <dir>] [--decrypt] [--effort <mode>] [--threads <n>]
-  cli repak <folder...> [-o <pak|dir>] [--simple-zip] [--effort <mode>] [--threads <n>]
-  cli decrypt <folder...> [--effort <mode>] [--threads <n>]
-  cli help
+  unpak <pak|folder...> [-o <dir>] [--decrypt] [--effort <mode>] [--threads <n>]
+  repak <folder...> [-o <pak|dir>] [--simple-zip] [--effort <mode>] [--threads <n>]
+  decrypt <folder...> [--effort <mode>] [--threads <n>]
+  help
 
 Commands:
   unpak    Extract .pak archives into folders (a directory target is scanned
@@ -59,6 +59,7 @@ Examples:
   npm run cli -- decrypt PAKS/unpaked/data_ptbr
   npm run cli -- unpak PAKS/pak --effort extreme
   npm run cli -- repak PAKS/unpaked/data_ptbr --effort manual --threads 6
+  aion-pak-manager.exe unpak PAKS/pak/data.pak
 `
 
 type Command = 'unpak' | 'repak' | 'decrypt' | 'help'
@@ -160,7 +161,7 @@ function collectPakFiles(targets: string[]): string[] {
 }
 
 // Windows GUI builds have no console attached: writing to stdout/stderr can
-// throw EBADF. Swallow failures so `app.exe cli …` never crashes; when output
+// throw EBADF. Swallow failures so `app.exe …` never crashes; when output
 // is redirected to a file the writes succeed normally.
 function out(text: string): void {
 	try {
@@ -274,6 +275,7 @@ async function runUnpak(opts: Options): Promise<void> {
 	const pool = new Piscina<UnpakTaskInput, UnpakTaskResult>({
 		filename: resolveUnpakWorkerFile(),
 		maxThreads: threads,
+		resourceLimits: workerResourceLimits(),
 	})
 	const progress = makeProgress('  ', !multi)
 	try {
@@ -347,6 +349,7 @@ async function runRepak(opts: Options): Promise<void> {
 	const pool = new Piscina<RepakTaskInput, RepakTaskResult>({
 		filename: resolveRepakWorkerFile(),
 		maxThreads: threads,
+		resourceLimits: workerResourceLimits(),
 	})
 	// Split the effort budget across folders: workers × inner ≤ threads.
 	const inner = innerConcurrency(folders.length)

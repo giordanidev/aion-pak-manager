@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs'
 import path from 'path'
-import type { AppSettings, CpuEffort } from '../../shared/api-types'
+import type { AppSettings, CpuEffort, EntryCountCacheEntry } from '../../shared/api-types'
 import { ROOT_DIR } from './paths'
 
 const SETTINGS_PATH = path.join(ROOT_DIR, 'settings.json')
@@ -31,6 +31,21 @@ function sanitize(raw: unknown): AppSettings {
 	}
 	if (typeof raw.manualCpuThreads === 'number' && Number.isFinite(raw.manualCpuThreads)) {
 		settings.manualCpuThreads = Math.max(1, Math.floor(raw.manualCpuThreads))
+	}
+	if (isRecord(raw.entryCountCache)) {
+		const entryCountCache: Record<string, EntryCountCacheEntry> = {}
+		for (const [key, value] of Object.entries(raw.entryCountCache)) {
+			if (!isRecord(value)) continue
+			if (typeof value.count !== 'number' || !Number.isFinite(value.count)) continue
+			if (typeof value.mtimeMs !== 'number' || !Number.isFinite(value.mtimeMs)) continue
+			const size = typeof value.size === 'number' && Number.isFinite(value.size) ? value.size : 0
+			entryCountCache[key] = {
+				count: Math.max(0, Math.floor(value.count)),
+				size: Math.max(0, Math.floor(size)),
+				mtimeMs: value.mtimeMs,
+			}
+		}
+		settings.entryCountCache = entryCountCache
 	}
 	if (isRecord(raw.customDirs)) {
 		const dirs: NonNullable<AppSettings['customDirs']> = {}
@@ -73,6 +88,9 @@ export function saveSettings(patch: Partial<AppSettings>): AppSettings {
 	const merged: AppSettings = { ...current, ...patch, version: SETTINGS_VERSION }
 	if (patch.customDirs) {
 		merged.customDirs = { ...current.customDirs, ...patch.customDirs }
+	}
+	if (patch.entryCountCache !== undefined) {
+		merged.entryCountCache = patch.entryCountCache
 	}
 	cache = merged
 	try {

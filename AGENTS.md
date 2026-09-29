@@ -2,12 +2,12 @@
 
 ## Active structure
 
-- `frontend/` — Vue 3 renderer (UI). Styling is 100% **Tailwind CSS v4** via `@tailwindcss/vite`; there is no component CSS — `frontend/assets/app.css` only contains `@import 'tailwindcss'`, the `@theme` block (color/font tokens) and global rules (reset, scrollbars, `TransitionGroup` transitions).
+- `frontend/` — Vue 3 renderer (UI). Styling is 100% **Tailwind CSS v4** via `@tailwindcss/vite`; there is no component CSS — `frontend/assets/app.css` only contains `@import 'tailwindcss'`, the `@theme` block (color/font tokens) and global rules (reset, scrollbars, `TransitionGroup` transitions). App icons: `frontend/assets/icon.png` (header + Linux) and `frontend/assets/icon.ico` (Windows installer / app / dev window).
 - `backend/` — Electron main, IPC, services, preload (source), workers, Node core/parse, `cli/` (headless unpak/repak)
 - `shared/` — shared IPC types/contracts (renderer + main + preload). No unpack/decrypt logic.
-- `build/` — `icon.ico` (Windows, generated from `frontend/assets/icon.svg` by `npm run icon`) plus the `aion-pak.cmd` wrapper; Linux uses `frontend/assets/icon.png`, and the app header uses `frontend/assets/icon.svg` (single source, no copies under `build/`); `version.json` (repo root) is the tiny update manifest served as a release asset / CDN fallback
+- `version.json` (repo root) — tiny update manifest served as a release asset / CDN fallback
 - `scripts/` — build helpers (version bump, icon, CLI bootstrap); `scripts/linux/` — **native** Linux builder (`build.sh` + `_common.sh`); `dist-linux-wsl.mjs` — Windows → **WSL2** driver (invokes the native builder inside the distros)
-- `.build/` — build artifacts (gitignored)
+- `.build/` — build artifacts (gitignored; created by `npm run build` / electron-vite)
 - All logic is implemented in Node.js; target: **Aion 1**.
 
 ## Commands
@@ -17,9 +17,8 @@
 - `npm run dist` — Windows installer (NSIS) + portable into `release/` (via electron-builder, targets `nsis` + `portable`; `PAKS/`, with `pak/`, `unpaked/`, `repaked/` inside, is created next to the .exe on boot)
 - `npm run dist:linux` — **native** Linux build (`scripts/linux/build.sh`): `.deb` on Ubuntu/Debian, `.rpm` on Fedora/RHEL, into `release/`; `npm run dist:linux:appimage` adds the portable `AppImage`. Runs inside Linux/WSL/container (rsync to `~/aion-pak-manager-build`, cached `npm ci`, electron-builder).
 - `npm run dist:linux:wsl[:ubuntu|:fedora]` — Windows → **WSL2** (`scripts/dist-linux-wsl.mjs`), which invokes the native builder inside the distro(s): Ubuntu produces `.deb` + `AppImage`, Fedora produces `.rpm`; artifacts are copied back to `release/`. Names include the target: `aion-pak-manager-<version>-setup-windows-x64.exe`, `-portable-windows-x64.exe`, `-setup-linux-ubuntu-amd64.deb`, `-setup-linux-fedora-x86_64.rpm`, `-portable-linux-x86_64.AppImage`.
-- `npm run icon` — regenerates `build/icon.ico` (Windows) and `build/icon.png` (Linux) from `frontend/assets/icon.svg`
 - CI: `.github/workflows/release.yml` builds Windows + Linux and attaches them to a GitHub Release on `v*` tags
-- `npm run cli|unpak|repak` — headless CLI (`.build/backend/cli.js`, entry `backend/cli/index.ts`, logic in `backend/cli/run.ts`); `precli|preunpak|prerepak` build the CLI if missing. In the packaged app: `<app>.exe cli <command>` (via `backend/index.ts`) + the `build/aion-pak.cmd` wrapper (extraFiles). `unpak`/`repak`/`decrypt` run on a Piscina pool sized by `--effort <low|medium|high|extreme|manual>` (+ `--threads <n>` for manual); without a flag, it uses `settings.json`. Each `.pak` is split into entry chunks (`scanPakEntries` + `extractPaksParallel`) to use several threads even with a single PAK.
+- `npm run cli|unpak|repak` — headless CLI (`.build/backend/cli.js`, entry `backend/cli/index.ts`, logic in `backend/cli/run.ts`); `precli|preunpak|prerepak` build the CLI if missing. In the packaged app: `<app>.exe <command>` (via `backend/index.ts`; optional legacy `cli` prefix still accepted). `unpak`/`repak`/`decrypt` run on a Piscina pool sized by `--effort <low|medium|high|extreme|manual>` (+ `--threads <n>` for manual); without a flag, it uses `settings.json`. Each `.pak` is split into entry chunks (`scanPakEntries` + `extractPaksParallel`) to use several threads even with a single PAK.
 
 ## Rules for agents
 

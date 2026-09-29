@@ -9,7 +9,7 @@ import { countFilesInPak } from '../core/unpak'
 import { addEntriesToPak, removeEntriesFromPak, type PakAddEntry } from '../core/repak'
 import { PAK_DIR, REPAKED_DIR, UNPAKED_DIR, pakRelPathFromFiles, unpakedFolderForPak, unpakedSingleFolderForPak } from './paths'
 import { mapPool } from './parallel'
-import { cpuThreadsForWork, innerConcurrency } from './threads'
+import { cpuThreadsForWork, innerConcurrency, workerResourceLimits } from './threads'
 import { extractPaksParallel, type UnpakJob } from './unpak-parallel'
 import type { UnpakTaskInput, UnpakTaskResult } from '../workers/unpak-task'
 import type { RepakTaskInput, RepakTaskResult } from '../workers/repak-task'
@@ -144,11 +144,19 @@ function ensureInsidePakDir(pkg: string, pakRoot: string = PAK_DIR): void {
 }
 
 function createUnpakPool(): Piscina<UnpakTaskInput, UnpakTaskResult> {
-	return new Piscina({ filename: resolveUnpakWorkerFile(), maxThreads: cpuThreadsForWork() })
+	return new Piscina({
+		filename: resolveUnpakWorkerFile(),
+		maxThreads: cpuThreadsForWork(),
+		resourceLimits: workerResourceLimits(),
+	})
 }
 
 function createRepakPool(): Piscina<RepakTaskInput, RepakTaskResult> {
-	return new Piscina({ filename: resolveRepakWorkerFile(), maxThreads: cpuThreadsForWork() })
+	return new Piscina({
+		filename: resolveRepakWorkerFile(),
+		maxThreads: cpuThreadsForWork(),
+		resourceLimits: workerResourceLimits(),
+	})
 }
 
 interface UnpackOneResult {

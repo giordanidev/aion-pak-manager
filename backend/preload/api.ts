@@ -55,8 +55,20 @@ export function buildElectronApi(): ElectronApi {
 		scanPaks: (dir?: string): Promise<ScanPaksResult> => ipcRenderer.invoke('scan-paks', toCloneable({ dir })),
 		scanUnpaked: (unpakedDir?: string, repakedDir?: string): Promise<ScanUnpakedResult> =>
 			ipcRenderer.invoke('scan-unpaked', toCloneable({ unpakedDir, repakedDir })),
-		countEntries: (paths: string[], kind: 'pak' | 'folder' | 'repaked', base?: string): Promise<CountEntriesResult> =>
-			ipcRenderer.invoke('count-entries', toCloneable({ paths: Array.from(paths), kind, base })),
+		countEntries: (
+			paths: string[],
+			kind: 'pak' | 'pakFolder' | 'folder' | 'repaked',
+			base?: string,
+			opts?: { force?: boolean },
+		): Promise<CountEntriesResult> =>
+			ipcRenderer.invoke(
+				'count-entries',
+				toCloneable({ paths: Array.from(paths), kind, base, force: opts?.force === true }),
+			),
+		clearEntryCountCache: (): Promise<{ success: boolean; error?: string }> =>
+			ipcRenderer.invoke('clear-entry-count-cache'),
+		deleteManagedPath: (targetPath: string, base?: string): Promise<OperationResult> =>
+			ipcRenderer.invoke('delete-managed-path', toCloneable({ path: targetPath, base })),
 		selectFolder: (): Promise<SelectFolderResult> => ipcRenderer.invoke('select-folder'),
 
 		listPakContents: (pakPath: string, base?: string): Promise<ListPakContentsResult> =>
@@ -85,6 +97,7 @@ export function buildElectronApi(): ElectronApi {
 				inputFolder: payload.inputFolder,
 				includeNonPak: payload.includeNonPak,
 				overwrite: payload.overwrite,
+				createPakFolder: payload.createPakFolder,
 				showFileProgress: payload.showFileProgress,
 				unpakedDir: payload.unpakedDir,
 				pakDir: payload.pakDir,

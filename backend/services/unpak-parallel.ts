@@ -1,6 +1,6 @@
 import type { Piscina } from 'piscina'
 import type { ProgressPayload } from '../../shared/api-types'
-import { scanPakEntries } from '../core/unpak'
+import { scanPakEntries, type PakScanResult } from '../core/unpak'
 import { mapPool } from './parallel'
 import type { ProgressCallback } from './progress'
 import { runUnpakWithProgress } from './unpak-pool'
@@ -31,6 +31,9 @@ const MIN_CHUNK = 8
  * from different PAKs interleave for full utilization. Emits a **global**
  * monotonic percent (`done files / total files`) plus the current PAK for the
  * progress label. Per-PAK failures do not abort the others.
+ *
+ * Pass `preScans` (from a prior conflict/check pass) to skip a second full TOC
+ * walk so extraction — and byte/speed progress — starts immediately.
  */
 export async function extractPaksParallel(
 	jobs: UnpakJob[],
@@ -38,14 +41,41 @@ export async function extractPaksParallel(
 	threads: number,
 	onProgress: ProgressCallback | undefined,
 	signal: AbortSignal | undefined,
+	preScans?: ReadonlyMap<string, PakScanResult>,
 ): Promise<UnpakJobOutcome[]> {
-	const scans = new Map<string, { files: string[]; version: number | null }>()
+	const scans = new Map<string, PakScanResult>()
+	const scanErrors = new Map<string, string>()
 	let grandTotal = 0
+	const needScan = jobs.filter((job) => !preScans?.has(job.pakPath))
 	for (const job of jobs) {
+		const cached = preScans?.get(job.pakPath)
+		if (cached) {
+			scans.set(job.pakPath, cached)
+			grandTotal += cached.files.length
+		}
+	}
+	for (let i = 0; i < needScan.length; i++) {
+		const job = needScan[i]!
 		if (signal?.aborted) throw new Error('Operation canceled')
-		const scan = await scanPakEntries(job.pakPath, () => signal?.aborted ?? false)
-		scans.set(job.pakPath, scan)
-		grandTotal += scan.files.length
+		onProgress?.({
+			stage: 'unpack',
+			packageName: job.packageName,
+			packageIndex: job.packageIndex,
+			packageTotal: job.packageTotal,
+			current: 0,
+			total: 0,
+			percent: Math.round(((i + 0.5) / Math.max(needScan.length, 1)) * 1000) / 10,
+			globalPercent: true,
+			fileName: job.packageName,
+		} as ProgressPayload)
+		try {
+			const scan = await scanPakEntries(job.pakPath, () => signal?.aborted ?? false)
+			scans.set(job.pakPath, scan)
+			grandTotal += scan.files.length
+		} catch (error) {
+			scans.set(job.pakPath, { files: [], version: null })
+			scanErrors.set(job.pakPath, error instanceof Error ? error.message : String(error))
+		}
 	}
 	const total = Math.max(grandTotal, 1)
 
@@ -68,7 +98,12 @@ export async function extractPaksParallel(
 
 	const outcomes = new Map<string, UnpakJobOutcome>()
 	for (const job of jobs) {
-		outcomes.set(job.pakPath, { job, ok: true, files: scans.get(job.pakPath)?.files ?? [] })
+		const scanError = scanErrors.get(job.pakPath)
+		if (scanError) {
+			outcomes.set(job.pakPath, { job, ok: false, error: scanError, files: [] })
+		} else {
+			outcomes.set(job.pakPath, { job, ok: true, files: scans.get(job.pakPath)?.files ?? [] })
+		}
 	}
 
 	let done = 0

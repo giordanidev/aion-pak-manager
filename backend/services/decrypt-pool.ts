@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, statSync } from 'fs'
+import { existsSync, readdirSync, realpathSync, statSync } from 'fs'
 import path from 'path'
 import { MessageChannel } from 'node:worker_threads'
 import { Piscina } from 'piscina'
@@ -6,7 +6,7 @@ import type { ProgressPayload } from '../../shared/api-types'
 import type { ProgressCallback } from './progress'
 import type { DecryptTaskInput, DecryptTaskResult } from '../workers/decrypt-task'
 import { mapPool } from './parallel'
-import { cpuThreadsForWork } from './threads'
+import { cpuThreadsForWork, workerResourceLimits } from './threads'
 
 export interface DecryptFileProgress extends ProgressPayload {
 	stage: 'decrypt';
@@ -35,33 +35,50 @@ export interface DecryptFolderResult {
 	failed: { path: string; error: string }[];
 }
 
+/** Prefer a real on-disk path under app.asar.unpacked (worker_threads cannot load from asar). */
+function toUnpackedPath(p: string): string {
+	const normalized = p.replace(/\\/g, '/')
+	if (normalized.includes('app.asar') && !normalized.includes('app.asar.unpacked')) {
+		return p.replace('app.asar', 'app.asar.unpacked')
+	}
+	return p
+}
+
+function resolveExisting(p: string): string | null {
+	try {
+		const candidate = toUnpackedPath(p)
+		if (!existsSync(candidate)) return null
+		try {
+			return realpathSync(candidate)
+		} catch {
+			return path.resolve(candidate)
+		}
+	} catch {
+		return null
+	}
+}
+
 function resolveWorkerFile(name: string): string {
+	const file = `${name}.js`
+	const fileTs = `${name}.ts`
+	const dir = __dirname
 	const candidates: string[] = [
-		path.join(__dirname, 'workers', `${name}.js`),
-		path.join(__dirname, '..', 'workers', `${name}.js`),
-		path.join(__dirname, '..', 'workers', `${name}.ts`),
-		path.resolve(process.cwd(), 'backend', 'workers', `${name}.js`),
-		path.resolve(process.cwd(), '.build', 'backend', 'workers', `${name}.js`),
-		path.resolve(process.cwd(), '.build', 'backend', 'workers', `${name}.ts`),
+		// Packaged: workers live next to the main bundle under asar.unpacked.
+		toUnpackedPath(path.join(dir, 'workers', file)),
+		toUnpackedPath(path.join(dir, '..', 'workers', file)),
+		path.join(dir, 'workers', file),
+		path.join(dir, '..', 'workers', file),
+		path.join(dir, '..', 'workers', fileTs),
+		path.resolve(process.cwd(), 'backend', 'workers', file),
+		path.resolve(process.cwd(), '.build', 'backend', 'workers', file),
+		path.resolve(process.cwd(), '.build', 'backend', 'workers', fileTs),
 	]
 	for (const cand of candidates) {
-		try {
-			if (existsSync(cand)) {
-				let out = cand
-				if (out.includes('app.asar') && !out.includes('app.asar.unpacked')) {
-					out = out.replace('app.asar', 'app.asar.unpacked')
-				}
-				return out
-			}
-		} catch {
-			// ignore
-		}
+		const resolved = resolveExisting(cand)
+		if (resolved) return resolved
 	}
-	const raw = path.join(__dirname, 'workers', `${name}.js`)
-	if (raw.includes('app.asar') && !raw.includes('app.asar.unpacked')) {
-		return raw.replace('app.asar', 'app.asar.unpacked')
-	}
-	return raw
+	const fallback = toUnpackedPath(path.join(dir, 'workers', file))
+	throw new Error(`Worker file not found: ${file} (looked near ${dir}; last candidate ${fallback})`)
 }
 
 export function resolveDecryptWorkerFile(): string {
@@ -76,10 +93,15 @@ export function resolveRepakWorkerFile(): string {
 	return resolveWorkerFile('repak-task')
 }
 
+export function resolveCountWorkerFile(): string {
+	return resolveWorkerFile('count-task')
+}
+
 export function createDecryptPool(): Piscina<DecryptTaskInput | string[], DecryptTaskResult> {
 	return new Piscina({
 		filename: resolveDecryptWorkerFile(),
 		maxThreads: cpuThreadsForWork(),
+		resourceLimits: workerResourceLimits(),
 	})
 }
 

@@ -52,7 +52,8 @@ export function createProgressSender(
 	// Disk-speed window: bytes read since the window opened and its start time.
 	let windowBytes = 0
 	let windowStart = 0
-	const FLUSH_MS = 1000
+	// Snappy enough for Speed/Total to appear early; still batches IPC load.
+	const FLUSH_MS = 250
 	// Safety bound only: the renderer log keeps the last 2000 entries, so a
 	// larger batch could not be displayed anyway. Well above the per-second rate
 	// of typical extractions, so names are effectively never dropped.
@@ -134,9 +135,8 @@ export function createProgressSender(
 				windowStart = 0
 				copy.speedMBs = 0
 			} else {
-				// Start of action: reset the window, no rate yet.
-				windowBytes = 0
-				windowStart = 0
+				// Per-package `*-start` must NOT wipe the byte window — a new
+				// createProgressSender already starts empty for each operation.
 				delete copy.speedMBs
 			}
 			if (!show()) {

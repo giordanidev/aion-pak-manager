@@ -37,6 +37,8 @@ const dropTargetFolder = ref('')
 const expandingKey = ref<string | null>(null)
 const repakedSelected = ref<{ key: string; name: string; isDir: boolean } | null>(null)
 const confirmTarget = ref<{ key: string; name: string; isDir: boolean } | null>(null)
+const deleteRootConfirmOpen = ref(false)
+const deletingRoot = ref(false)
 const pendingDrop = ref<{ paths: string[]; targetFolder: string; conflicts: string[] } | null>(null)
 
 const isRepaked = computed(() => props.source === 'repaked')
@@ -95,6 +97,7 @@ function sortChildren(node: TreeNode): TreeNode[] {
 }
 
 const pakName = computed(() => (props.pakPath ? basename(props.pakPath) : ''))
+const isRootFolder = computed(() => props.structureOnly || !isPakName(pakName.value))
 const isSelected = (file: string): boolean => selected.value.includes(file)
 const searchActive = computed(() => searchQuery.value.trim().length > 0)
 
@@ -307,6 +310,50 @@ async function confirmDelete(): Promise<void> {
 
 function cancelDelete(): void {
   confirmTarget.value = null
+}
+
+function requestDeleteRoot(): void {
+  if (!props.pakPath || state.actionRunning || deletingRoot.value || deleteRootConfirmOpen.value || confirmTarget.value) return
+  deleteRootConfirmOpen.value = true
+}
+
+async function confirmDeleteRoot(): Promise<void> {
+  const targetPath = props.pakPath
+  if (!targetPath || state.actionRunning || deletingRoot.value) return
+  const name = basename(targetPath)
+  deletingRoot.value = true
+  setActionRunning(true)
+  clearLog()
+  setSummary(t('pak.deletingRoot', { name }), 'info')
+  log(t('pak.deletingRootLog', { name }))
+  try {
+    const result = await electron.deleteManagedPath(targetPath, contentBase.value)
+    if (result.success) {
+      log(t('pak.deleteRootDone', { name }), 'success')
+      setSummary(t('pak.deleteRootDone', { name }), 'success')
+      deleteRootConfirmOpen.value = false
+      emit('done')
+      emit('close')
+    } else {
+      deleteRootConfirmOpen.value = false
+      log(t('pak.deleteRootFailed', { error: result.error || '' }), 'error')
+      setSummary(t('pak.deleteRootFailed', { error: result.error || '' }), 'error')
+    }
+  } catch (err) {
+    deleteRootConfirmOpen.value = false
+    const message = err instanceof Error ? err.message : String(err)
+    log(t('pak.deleteRootFailed', { error: message }), 'error')
+    setSummary(t('pak.deleteRootFailed', { error: message }), 'error')
+  } finally {
+    deletingRoot.value = false
+    setActionRunning(false)
+    setProgress(0, t('progress.idle'))
+  }
+}
+
+function cancelDeleteRoot(): void {
+  if (deletingRoot.value) return
+  deleteRootConfirmOpen.value = false
 }
 
 function onDragOver(event: DragEvent): void {
@@ -559,6 +606,11 @@ function close(): void {
 
 function onKeydown(event: KeyboardEvent): void {
   if (event.key === 'Escape') {
+    if (deleteRootConfirmOpen.value) {
+      if (deletingRoot.value) return
+      deleteRootConfirmOpen.value = false
+      return
+    }
     if (confirmTarget.value) {
       confirmTarget.value = null
       return
@@ -573,7 +625,7 @@ function onKeydown(event: KeyboardEvent): void {
   const target = event.target as HTMLElement | null
   const isTextInput =
     !!target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)
-  if (event.key === 'Delete' && !isTextInput && isRepaked.value && !props.structureOnly && repakedSelected.value && !confirmTarget.value) {
+  if (event.key === 'Delete' && !isTextInput && isRepaked.value && !props.structureOnly && repakedSelected.value && !confirmTarget.value && !deleteRootConfirmOpen.value) {
     event.preventDefault()
     requestDelete()
   }
@@ -597,6 +649,8 @@ watch(
       expandingKey.value = null
       repakedSelected.value = null
       confirmTarget.value = null
+      deleteRootConfirmOpen.value = false
+      deletingRoot.value = false
       pendingDrop.value = null
       void loadContents()
       window.addEventListener('keydown', onKeydown)
@@ -619,7 +673,25 @@ onBeforeUnmount(() => {
       aria-modal="true"
     >
       <div class="flex flex-none items-center justify-between gap-3 border-b border-border px-5 py-4">
-        <h3 class="m-0 text-bright">{{ t('pak.contentsTitle', { name: pakName }) }}</h3>
+        <div class="flex min-w-0 items-center gap-2">
+          <h3 class="m-0 min-w-0 truncate text-bright">{{ t('pak.contentsTitle', { name: pakName }) }}</h3>
+          <button
+            v-if="pakPath"
+            type="button"
+            class="box-border inline-flex h-7 w-7 min-w-7 flex-none items-center justify-center rounded-lg border border-border bg-hover p-0 text-dim cursor-pointer transition duration-150 enabled:hover:border-red enabled:hover:bg-red/15 enabled:hover:text-red disabled:cursor-not-allowed disabled:opacity-50"
+            v-app-title="isRootFolder ? t('pak.deleteRootHint') : t('pak.deleteRootFileHint')"
+            :disabled="state.actionRunning || deletingRoot"
+            @click="requestDeleteRoot"
+          >
+            <span v-if="deletingRoot" class="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/35 border-t-white"></span>
+            <svg v-else width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M2.5 4.5h11" />
+              <path d="M6 4.5V3a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v1.5" />
+              <path d="M12.5 4.5V13a1.5 1.5 0 0 1-1.5 1.5h-6A1.5 1.5 0 0 1 3.5 13V4.5" />
+              <path d="M6.5 7v5M9.5 7v5" />
+            </svg>
+          </button>
+        </div>
         <button
           class="inline-flex h-8 w-8 min-w-8 items-center justify-center rounded-lg border border-red bg-transparent p-0 text-[15px] font-bold leading-none text-red cursor-pointer transition duration-150 enabled:hover:bg-red/15"
           :disabled="state.actionRunning"
@@ -767,6 +839,37 @@ onBeforeUnmount(() => {
               <span v-if="state.actionRunning" class="mr-2 inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/35 border-t-white"></span>{{ t('pak.unpak') }}
             </button>
           </div>
+        </div>
+      </div>
+      <div v-if="deleteRootConfirmOpen" class="absolute inset-0 z-10 flex items-center justify-center rounded-xl bg-black/60 p-5" @click.self="cancelDeleteRoot">
+        <div class="w-full max-w-[420px] rounded-[10px] border border-border bg-card px-5 py-[18px] shadow-[0_8px_30px_rgba(0,0,0,0.5)]">
+          <template v-if="deletingRoot">
+            <div class="flex flex-col items-center gap-3 py-2 text-center">
+              <span class="inline-block h-8 w-8 animate-spin rounded-full border-2 border-white/35 border-t-accent"></span>
+              <h4 class="m-0 text-bright">{{ t('pak.deletingRoot', { name: pakName }) }}</h4>
+              <p class="m-0 text-[13px] text-dim">{{ t('pak.deletingRootWait') }}</p>
+            </div>
+          </template>
+          <template v-else>
+            <h4 class="m-0 mb-2 text-bright">{{ t('pak.deleteConfirmTitle') }}</h4>
+            <p class="m-0 mb-4 break-words text-[13px] text-text">
+              {{
+                isRootFolder
+                  ? t('pak.deleteRootConfirmFolder', { name: pakName })
+                  : t('pak.deleteRootConfirmFile', { name: pakName })
+              }}
+            </p>
+            <div class="flex justify-end gap-2.5">
+              <button
+                class="inline-flex items-center justify-center rounded-lg border border-border bg-hover px-4 py-2 text-sm text-text cursor-pointer transition duration-150 enabled:hover:bg-border disabled:cursor-not-allowed disabled:opacity-50"
+                @click="cancelDeleteRoot"
+              >{{ t('common.cancel') }}</button>
+              <button
+                class="inline-flex items-center justify-center rounded-lg bg-red px-4 py-2 text-sm text-white cursor-pointer transition duration-150 enabled:hover:-translate-y-px enabled:hover:bg-[#f87171] disabled:cursor-not-allowed disabled:bg-[#555] disabled:opacity-50"
+                @click="confirmDeleteRoot"
+              >{{ t('pak.deleteConfirmAction') }}</button>
+            </div>
+          </template>
         </div>
       </div>
       <div v-if="confirmTarget" class="absolute inset-0 z-10 flex items-center justify-center rounded-xl bg-black/60 p-5" @click.self="cancelDelete">

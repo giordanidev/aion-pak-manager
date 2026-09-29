@@ -1,20 +1,19 @@
 {
 	"name": "aion-pak-manager",
-	"version": "0.0.84",
+	"version": "0.0.91",
 	"description": "Native AION PAK extraction in Node.js using AION pak2zip format decoding.",
 	"main": ".build/backend/index.js",
 	"scripts": {
 		"dev": "electron-vite dev",
-		"build": "node scripts/bump-version.mjs && electron-vite build",
-		"icon": "node scripts/make-icon.mjs",
-		"dist": "npm run icon && npm run build && electron-builder --win --publish never",
-		"dist:dir": "npm run icon && npm run build && electron-builder --win --dir",
+		"build": "node scripts/bump-version.mjs && electron-vite build && node scripts/bundle-workers.mjs",
+		"dist": "npm run build && electron-builder --win --publish never",
+		"dist:dir": "npm run build && electron-builder --win --dir",
 		"dist:linux": "bash scripts/linux/build.sh",
 		"dist:linux:appimage": "bash scripts/linux/build.sh --with-appimage",
 		"dist:linux:wsl": "node scripts/dist-linux-wsl.mjs all",
 		"dist:linux:wsl:ubuntu": "node scripts/dist-linux-wsl.mjs ubuntu",
 		"dist:linux:wsl:fedora": "node scripts/dist-linux-wsl.mjs fedora",
-		"build:app": "electron-vite build",
+		"build:app": "electron-vite build && node scripts/bundle-workers.mjs",
 		"preview": "electron-vite preview",
 		"cli": "node .build/backend/cli.js",
 		"unpak": "node .build/backend/cli.js unpak",
@@ -27,15 +26,12 @@
 		"typecheck": "npm run typecheck:node && npm run typecheck:web"
 	},
 	"devDependencies": {
-		"@resvg/resvg-js": "^2.6.2",
 		"@tailwindcss/vite": "^4.3.3",
 		"@types/node": "^26.2.0",
 		"@vitejs/plugin-vue": "^6.0.8",
 		"electron": "^25.9.8",
 		"electron-builder": "^26.0.12",
 		"electron-vite": "^5.0.0",
-		"png-to-ico": "^3.0.2",
-		"pngjs": "^7.0.0",
 		"tailwindcss": "^4.3.3",
 		"typescript": "^5.9.3",
 		"vite": "^7.3.6",
@@ -55,7 +51,8 @@
 		"productName": "Aion PAK Manager",
 		"copyright": "Copyright © Giordani.dev",
 		"directories": {
-			"output": "release"
+			"output": "release",
+			"buildResources": "frontend/assets"
 		},
 		"publish": [
 			{
@@ -70,29 +67,24 @@
 		],
 		"asarUnpack": [
 			".build/backend/workers/**/*",
-			".build/backend/chunks/**/*"
+			".build/backend/chunks/**/*",
+			"node_modules/piscina/**"
 		],
 		"win": {
-			"icon": "build/icon.ico",
+			"icon": "frontend/assets/icon.ico",
 			"executableName": "aion-pak-manager",
 			"target": [
 				"nsis",
 				"portable"
-			],
-			"extraFiles": [
-				{
-					"from": "build/aion-pak.cmd",
-					"to": "aion-pak.cmd"
-				}
 			]
 		},
 		"nsis": {
 			"artifactName": "aion-pak-manager-${version}-setup-windows-${arch}.${ext}",
 			"oneClick": false,
 			"allowToChangeInstallationDirectory": true,
-			"installerIcon": "build/icon.ico",
-			"uninstallerIcon": "build/icon.ico",
-			"installerHeaderIcon": "build/icon.ico"
+			"installerIcon": "frontend/assets/icon.ico",
+			"uninstallerIcon": "frontend/assets/icon.ico",
+			"installerHeaderIcon": "frontend/assets/icon.ico"
 		},
 		"portable": {
 			"artifactName": "aion-pak-manager-${version}-portable-windows-${arch}.${ext}"

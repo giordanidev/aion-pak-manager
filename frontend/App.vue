@@ -12,7 +12,7 @@ import { useElectron } from './composables/useElectron'
 import { useAppState } from './composables/useAppState'
 import { LOCALE_FLAG_ICONS, LOCALE_LABELS, SUPPORTED_LOCALES, setLocale, getInitialLocale, type SupportedLocale } from './i18n'
 import type { CheckUpdateResult, ConflictChoice, ConflictRequest, UpdateState } from '../shared/api-types'
-import appIcon from './assets/icon.svg'
+import appIcon from './assets/icon.png'
 
 const { t, locale } = useI18n()
 const electron = useElectron()

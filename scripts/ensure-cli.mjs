@@ -11,5 +11,5 @@ const cliOutput = path.join(root, '.build', 'backend', 'cli.js')
 
 if (!existsSync(cliOutput)) {
 	console.error('[cli] .build/backend/cli.js not found — building...')
-	execSync('npx electron-vite build', { cwd: root, stdio: 'inherit' })
+	execSync('npx electron-vite build && node scripts/bundle-workers.mjs', { cwd: root, stdio: 'inherit' })
 }

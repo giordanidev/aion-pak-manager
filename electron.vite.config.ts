@@ -38,6 +38,8 @@ export default defineConfig({
         input: {
           index: resolve(__dirname, 'backend/index.ts'),
           cli: resolve(__dirname, 'backend/cli/index.ts'),
+          // First-pass worker emits; `scripts/bundle-workers.mjs` overwrites with
+          // fully inlined CJS (no shared chunks) after electron-vite build.
           'workers/decrypt-task': resolve(__dirname, 'backend/workers/decrypt-task.ts'),
           'workers/unpak-task': resolve(__dirname, 'backend/workers/unpak-task.ts'),
           'workers/repak-task': resolve(__dirname, 'backend/workers/repak-task.ts')

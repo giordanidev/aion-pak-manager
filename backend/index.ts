@@ -19,8 +19,12 @@ let mainWindow: BrowserWindow | null = null
 
 function devIconPath(): string | undefined {
 	if (app.isPackaged) return undefined
-	const icon = join(app.getAppPath(), 'build', 'icon.ico')
-	return existsSync(icon) ? icon : undefined
+	const assets = join(app.getAppPath(), 'frontend', 'assets')
+	for (const name of ['icon.ico', 'icon.png'] as const) {
+		const icon = join(assets, name)
+		if (existsSync(icon)) return icon
+	}
+	return undefined
 }
 
 function savedBounds(): AppWindowBounds | undefined {
@@ -108,9 +112,19 @@ function createWindow(): void {
 	}
 }
 
-// Packaged app: `<app>.exe cli <command>` runs headless (no window). In
-// development the CLI is run directly via `node .build/backend/cli.js`.
-const cliArgs = process.argv[1] === 'cli' ? process.argv.slice(2) : null
+// Packaged app: `<app>.exe <command>` runs headless (no window). A legacy
+// `cli` prefix is still accepted. In development use `node .build/backend/cli.js`.
+const CLI_COMMANDS = new Set(['unpak', 'repak', 'decrypt', 'help', '-h', '--help'])
+
+function resolvePackagedCliArgs(argv: string[]): string[] | null {
+	const args = argv.slice(1)
+	if (args.length === 0) return null
+	if (args[0] === 'cli') return args.slice(1)
+	if (CLI_COMMANDS.has(args[0]!)) return args
+	return null
+}
+
+const cliArgs = resolvePackagedCliArgs(process.argv)
 
 if (cliArgs) {
 	app.whenReady().then(async () => {

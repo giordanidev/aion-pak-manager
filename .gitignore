@@ -1,5 +1,6 @@
 node_modules/
 .build/
+build/
 release/
 .DS_Store
 settings.json

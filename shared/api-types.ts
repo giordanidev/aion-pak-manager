@@ -49,6 +49,14 @@ export interface AppWindowBounds {
 
 export type CpuEffort = 'low' | 'medium' | 'high' | 'extreme' | 'manual';
 
+/** Cached file count for a list entry (folder or .pak), keyed by absolute path. */
+export interface EntryCountCacheEntry {
+	count: number;
+	size: number;
+	/** Root path mtime when the count was taken — invalidate when it changes. */
+	mtimeMs: number;
+}
+
 export interface AppSettings {
 	version?: number;
 	locale?: string;
@@ -58,6 +66,8 @@ export interface AppSettings {
 	windowBounds?: AppWindowBounds;
 	cpuEffort?: CpuEffort;
 	manualCpuThreads?: number;
+	/** Persisted file counts so huge folders are not re-walked on every refresh. */
+	entryCountCache?: Record<string, EntryCountCacheEntry>;
 }
 
 export interface SettingsResult {
@@ -166,6 +176,11 @@ export interface CountEntriesResult {
 	error?: string;
 }
 
+export interface CountEntriesOptions {
+	/** Ignore entryCountCache and re-walk the filesystem. */
+	force?: boolean;
+}
+
 export interface ListPakContentsResult {
 	success: boolean;
 	files?: string[];
@@ -204,8 +219,12 @@ export interface ExtractFolderResult {
 		outputFolder: string;
 		paksExtracted: number;
 		otherFilesCopied: number;
+		extractedFiles: number;
+		extractedBytes: number;
+		otherFilesBytes: number;
 		dbPaths: string[];
 		skippedExisting: string[];
+		failedPaks?: { relPakPath: string; error: string }[];
 	};
 	error?: string;
 }
@@ -225,6 +244,12 @@ export interface ExtractFolderPayload {
 	includeNonPak?: boolean;
 	overwrite?: boolean;
 	showFileProgress?: boolean;
+	/**
+	 * When true, each `.pak` is extracted into a sibling folder named after the
+	 * pak stem (`…/name.pak` → `…/name/…`) instead of directly into the mirrored
+	 * parent. Stored as `destDir` in the aggregate DB for Reconstruct.
+	 */
+	createPakFolder?: boolean;
 	/** Extraction output root (custom "unpaked" folder); defaults to /PAKS/unpaked. */
 	unpakedDir?: string;
 	/** Source PAK root (custom "pak" folder); defaults to /PAKS/pak. */
@@ -302,7 +327,14 @@ export interface ProgressOptions {
 export interface ElectronApi {
 	scanPaks(dir?: string): Promise<ScanPaksResult>;
 	scanUnpaked(unpakedDir?: string, repakedDir?: string): Promise<ScanUnpakedResult>;
-	countEntries(paths: string[], kind: 'pak' | 'pakFolder' | 'folder' | 'repaked', base?: string): Promise<CountEntriesResult>;
+	countEntries(
+		paths: string[],
+		kind: 'pak' | 'pakFolder' | 'folder' | 'repaked',
+		base?: string,
+		opts?: CountEntriesOptions,
+	): Promise<CountEntriesResult>;
+	clearEntryCountCache(): Promise<{ success: boolean; error?: string }>;
+	deleteManagedPath(path: string, base?: string): Promise<OperationResult>;
 	selectFolder(): Promise<SelectFolderResult>;
 	listPakContents(pakPath: string, base?: string): Promise<ListPakContentsResult>;
 	unpakPackages(paths: string[], opts?: ProgressOptions): Promise<OperationResult>;

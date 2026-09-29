@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { CheckUpdateResult, CpuEffort, UpdateState } from '../../shared/api-types'
 import { useElectron } from '../composables/useElectron'
+import { useAppState } from '../composables/useAppState'
 
 const props = defineProps<{
   open: boolean
@@ -31,6 +32,7 @@ const updateDisabled = computed(() => !canUpdate.value || downloading.value || p
 
 const { t } = useI18n()
 const electron = useElectron()
+const { recountAllCounts, log, setSummary } = useAppState()
 
 const appVersion = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : ''
 
@@ -38,6 +40,7 @@ const rememberWindowBounds = ref(false)
 const cpuEffort = ref<CpuEffort>('high')
 const manualThreads = ref(1)
 const totalThreads = ref(1)
+const recounting = ref(false)
 
 watch(
   () => props.open,
@@ -129,6 +132,24 @@ async function openReleases(): Promise<void> {
     await electron.openReleases()
   } catch {
     // ignore — nothing to report in UI
+  }
+}
+
+async function onRecountCounts(): Promise<void> {
+  if (recounting.value) return
+  recounting.value = true
+  try {
+    setSummary(t('settings.recounting'), 'info')
+    log(t('settings.recounting'), 'info')
+    await recountAllCounts()
+    setSummary(t('settings.recountStarted'), 'success')
+    log(t('settings.recountStarted'), 'success')
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    setSummary(t('settings.recountFailed', { error: message }), 'error')
+    log(t('settings.recountFailed', { error: message }), 'error')
+  } finally {
+    recounting.value = false
   }
 }
 </script>
@@ -225,6 +246,27 @@ async function openReleases(): Promise<void> {
             </div>
           </div>
           <p class="m-0 text-xs leading-relaxed text-dim">{{ t('settings.cpuEffortExplanation') }}</p>
+        </div>
+
+        <div class="flex flex-col gap-2 rounded-lg border border-border bg-deepest px-3.5 py-3">
+          <div class="flex items-center justify-between gap-3">
+            <div class="min-w-0 flex-1">
+              <div class="text-sm text-text">{{ t('settings.recountCounts') }}</div>
+              <p class="m-0 mt-1 text-xs leading-relaxed text-dim">{{ t('settings.recountCountsHint') }}</p>
+            </div>
+            <button
+              type="button"
+              class="box-border inline-flex h-9 flex-none items-center justify-center gap-2 rounded-lg border border-border bg-hover px-4 text-sm text-text cursor-pointer transition duration-150 enabled:hover:bg-border disabled:cursor-not-allowed disabled:opacity-50"
+              :disabled="recounting"
+              @click="onRecountCounts"
+            >
+              <span
+                v-if="recounting"
+                class="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/35 border-t-white"
+              ></span>
+              {{ t('settings.recountCountsAction') }}
+            </button>
+          </div>
         </div>
 
         <div class="mt-auto flex flex-col gap-3 rounded-lg border border-border bg-deepest px-3.5 py-3">

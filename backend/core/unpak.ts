@@ -2,6 +2,12 @@ import { closeSync, mkdirSync, openSync, readSync, statSync, writeFileSync } fro
 import path from 'path';
 import { inflateRawSync, inflateSync } from 'zlib';
 import { TABLE1, TABLE2, crc32, crc32Unsigned } from '../parse/pak-codec';
+import {
+	countChromiumPakFiles,
+	extractChromiumPakToFolder,
+	isChromiumPak,
+	listChromiumPakFiles,
+} from './chromium-pak';
 
 export interface UnpackProgress {
 	stage: 'unpack';
@@ -133,20 +139,43 @@ export async function countPakEntries(fd: number, fileSize: number, shouldAbort:
 	return count;
 }
 
-function isZipPak(inputPath: string): boolean {
+/** AION local-file signature (LE). */
+export const AION_LOCAL_SIG = 0xFBFCB4AF;
+const ZIP_LOCAL_SIG = 0x04034b50;
+
+export type PakFileKind = 'aion' | 'zip' | 'chromium' | 'other';
+
+/**
+ * Peek the first 4 bytes of a file to classify it. AION Client trees often
+ * contain Chromium/CEF `.pak` assets (data-pack version 4/5) alongside AION
+ * archives — both are extractable; truly unknown `.pak` files are copied.
+ */
+export function peekPakKind(inputPath: string): PakFileKind {
 	const fd = openSync(inputPath, 'r');
 	try {
 		const sigBuf = Buffer.alloc(4);
 		if (readSync(fd, sigBuf, 0, 4, 0) !== 4) {
-			return false;
+			return 'other';
 		}
-		return sigBuf.readUInt32LE(0) === 0x04034b50;
+		const sig = sigBuf.readUInt32LE(0);
+		if (sig === AION_LOCAL_SIG) return 'aion';
+		if (sig === ZIP_LOCAL_SIG) return 'zip';
+		if (sig === 4 || sig === 5) return 'chromium';
+		return 'other';
 	} finally {
 		closeSync(fd);
 	}
 }
 
-const ZIP_LOCAL_SIG = 0x04034b50;
+/** True when the file is an AION PAK, ZIP-based AION PAK, or Chromium/CEF data-pack. */
+export function isExtractablePak(inputPath: string): boolean {
+	const kind = peekPakKind(inputPath);
+	return kind === 'aion' || kind === 'zip' || kind === 'chromium';
+}
+
+function isZipPak(inputPath: string): boolean {
+	return peekPakKind(inputPath) === 'zip';
+}
 const ZIP_CENTRAL_SIG = 0x02014b50;
 const ZIP_EOCD_SIG = 0x06054b50;
 
@@ -160,6 +189,10 @@ interface ZipEntry {
 }
 
 export async function countFilesInPak(inputPath: string, shouldAbort: ShouldAbort = () => false): Promise<number> {
+	if (isChromiumPak(inputPath)) {
+		if (shouldAbort()) throw new Error('Operation canceled');
+		return countChromiumPakFiles(inputPath);
+	}
 	if (isZipPak(inputPath)) {
 		const fd = openSync(inputPath, 'r');
 		try {
@@ -189,6 +222,10 @@ export async function countFilesInPak(inputPath: string, shouldAbort: ShouldAbor
  * extracting data. Names are normalized to `/` separators.
  */
 export async function listFilesInPak(inputPath: string, shouldAbort: ShouldAbort = () => false): Promise<string[]> {
+	if (isChromiumPak(inputPath)) {
+		if (shouldAbort()) throw new Error('Operation canceled');
+		return listChromiumPakFiles(inputPath);
+	}
 	if (isZipPak(inputPath)) {
 		const fd = openSync(inputPath, 'r');
 		try {
@@ -281,7 +318,7 @@ export interface PakScanResult {
  * probe. Cheap: only local headers (+ one payload for version detection).
  */
 export async function scanPakEntries(inputPath: string, shouldAbort: ShouldAbort = () => false): Promise<PakScanResult> {
-	if (isZipPak(inputPath)) {
+	if (isChromiumPak(inputPath) || isZipPak(inputPath)) {
 		return { files: await listFilesInPak(inputPath, shouldAbort), version: null };
 	}
 
@@ -574,6 +611,28 @@ export async function extractPakToFolder(
 	entryFilter?: ReadonlySet<string> | string[] | null,
 	versionHint?: number,
 ): Promise<void> {
+	if (isChromiumPak(inputPath)) {
+		await extractChromiumPakToFolder(
+			inputPath,
+			outputFolder,
+			progressCallback
+				? (info) => {
+						progressCallback({
+							stage: 'unpack',
+							current: info.current,
+							total: info.total,
+							percent: info.percent,
+							fileName: info.fileName,
+							outputFolder,
+							bytesDelta: info.bytesDelta,
+						});
+					}
+				: undefined,
+			shouldAbort,
+			entryFilter,
+		);
+		return;
+	}
 	if (isZipPak(inputPath)) {
 		return await extractZipPakToFolder(inputPath, outputFolder, progressCallback, shouldAbort, entryFilter);
 	}

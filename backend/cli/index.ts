@@ -2,7 +2,7 @@
 //
 //   node .build/backend/cli.js <command> [args]
 //
-// The packaged app also exposes the same commands via `<app>.exe cli <command>`
+// The packaged app also exposes the same commands via `<app>.exe <command>`
 // (see backend/index.ts). Logic lives in backend/cli/run.ts.
 import '../bin/threadpool'
 import { runCli } from './run'

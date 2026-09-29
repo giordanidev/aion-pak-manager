@@ -6,6 +6,7 @@ import { getShowFileNames, useElectron } from '../composables/useElectron'
 import { useAppState, basename, truncateMiddle } from '../composables/useAppState'
 import PakContentsModal from './PakContentsModal.vue'
 import DbModal from './DbModal.vue'
+import ConfirmModal from './ConfirmModal.vue'
 
 const { t } = useI18n()
 const electron = useElectron()
@@ -20,6 +21,16 @@ const unpakedModalOpen = ref(false)
 const unpakedModalPath = ref<string | null>(null)
 const dbOpen = ref(false)
 const dbInitialPath = ref<string | null>(null)
+const restoreConfirmOpen = ref(false)
+
+const allUnpakedSelected = computed({
+  get: () =>
+    state.unpakedFolders.length > 0 &&
+    state.unpakedFolders.every((folder) => selectedFolderPaths.value.includes(folder.fullPath)),
+  set: (value: boolean) => {
+    selectedFolderPaths.value = value ? state.unpakedFolders.map((folder) => folder.fullPath) : []
+  },
+})
 
 function openFolderDb(dbPath: string): void {
   if (state.actionRunning) return
@@ -55,6 +66,12 @@ async function onRepakedDone(): Promise<void> {
   await refreshLists()
 }
 
+async function onUnpakedDone(): Promise<void> {
+  unpakedModalOpen.value = false
+  unpakedModalPath.value = null
+  await refreshLists()
+}
+
 interface FailureEntry {
   folderPath?: string
   folderName?: string
@@ -65,13 +82,13 @@ interface FailureEntry {
 async function decryptSelectedUnpaked(): Promise<void> {
   const selected = Array.from(selectedFolderPaths.value)
   if (selected.length === 0) {
-    log(t('unpaked.selectFirstDecrypt'), 'error')
+    log(t('unpaked.selectFirstDecrypt', { dir: dirLabel('unpaked') }), 'error')
     return
   }
   setActionRunning(true)
   clearLog()
-  setSummary(t('unpaked.decryptingN', { n: selected.length }), 'info')
-  log(t('unpaked.decryptingNLog', { n: selected.length }))
+  setSummary(t('unpaked.decryptingN', { n: selected.length, dir: dirLabel('unpaked') }), 'info')
+  log(t('unpaked.decryptingNLog', { n: selected.length, dir: dirLabel('unpaked') }))
   try {
     const result = await electron.decryptUnpaked(selected, { showFileProgress: getShowFileNames() })
     if (result.success) {
@@ -104,13 +121,13 @@ async function decryptSelectedUnpaked(): Promise<void> {
 async function repackSelectedUnpaked(): Promise<void> {
   const selected = Array.from(selectedFolderPaths.value)
   if (selected.length === 0) {
-    log(t('unpaked.selectFirstRepak'), 'error')
+    log(t('unpaked.selectFirstRepak', { dir: dirLabel('unpaked') }), 'error')
     return
   }
   setActionRunning(true)
   clearLog()
-  setSummary(t('unpaked.repakingN', { n: selected.length }), 'info')
-  log(t('unpaked.repakingNLog', { n: selected.length }))
+  setSummary(t('unpaked.repakingN', { n: selected.length, dir: dirLabel('unpaked') }), 'info')
+  log(t('unpaked.repakingNLog', { n: selected.length, dir: dirLabel('unpaked') }))
   try {
     const result = await electron.repackUnpaked({
       selectedFolderPaths: selected,
@@ -187,8 +204,14 @@ async function changeActiveFolder(): Promise<void> {
 
 async function resetActiveFolder(): Promise<void> {
   if (state.actionRunning || state.listsRefreshing) return
+  restoreConfirmOpen.value = false
   setCustomDir(activeDirKey.value, '')
   await refreshLists()
+}
+
+function requestResetActiveFolder(): void {
+  if (state.actionRunning || state.listsRefreshing || !state.customDirs[activeDirKey.value]) return
+  restoreConfirmOpen.value = true
 }
 </script>
 
@@ -217,14 +240,15 @@ async function resetActiveFolder(): Promise<void> {
       </div>
       <div class="inline-flex items-center gap-2 self-start">
         <button
+          v-if="state.customDirs[activeDirKey]"
           class="box-border inline-flex h-[30px] w-[30px] min-w-[30px] items-center justify-center rounded-lg border border-border bg-hover p-0 text-dim cursor-pointer transition duration-150 enabled:hover:bg-border enabled:hover:text-bright disabled:cursor-not-allowed disabled:opacity-50"
-          v-app-title="t('common.changeFolderFor', { target: activeTab === 'repaked' ? t('unpaked.repaks') : t('unpaked.openUnpakeds') })"
-          @click="changeActiveFolder"
+          v-app-title="t('common.restoreFolder')"
+          :disabled="state.actionRunning || state.listsRefreshing"
+          @click="requestResetActiveFolder"
         >
-          <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M1.6 4.1a1.1 1.1 0 0 1 1.1-1.1h2.9l1.3 1.5h6.4a1.1 1.1 0 0 1 1.1 1.1v1.6" />
-            <path d="M1.6 4.1v7.6a1.1 1.1 0 0 0 1.1 1.1h5.1" />
-            <path d="m12.4 8.6 2 2-3.9 3.9-2.2.4.4-2.2z" />
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M13 8a5 5 0 1 1-1.5-3.5" />
+            <path d="M13 2.5V6H9.5" />
           </svg>
         </button>
         <button
@@ -249,16 +273,26 @@ async function resetActiveFolder(): Promise<void> {
     </div>
     <div class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-tr-xl rounded-b-xl border border-border bg-card p-3.5 shadow-[0_2px_18px_rgba(0,0,0,0.25)]">
       <div class="mt-1 mb-3 flex items-center gap-2">
+        <label
+          v-if="activeTab === 'unpaked' && state.trLoaded && state.unpakedFolders.length > 0"
+          class="relative inline-flex h-5 w-9 flex-none cursor-pointer select-none items-center has-[:disabled]:pointer-events-none has-[:disabled]:opacity-50"
+          v-app-title="t('common.selectAll')"
+        >
+          <input type="checkbox" class="peer sr-only" v-model="allUnpakedSelected" :disabled="state.actionRunning" />
+          <span class="h-5 w-9 rounded-full border border-border bg-card transition-colors peer-checked:border-accent peer-checked:bg-accent/25"></span>
+          <span class="pointer-events-none absolute left-0.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 rounded-full bg-[#e9e9ff] transition-all peer-checked:left-[18px] peer-checked:bg-accent"></span>
+        </label>
         <div class="min-w-0 flex-1 truncate text-sm text-dim" :title="activeDir">{{ t('pak.folderPath', { path: activeDirShown }) }}</div>
         <button
-          v-if="state.customDirs[activeDirKey]"
           class="box-border inline-flex h-[26px] w-[26px] min-w-[26px] flex-none items-center justify-center rounded-lg border border-border bg-hover p-0 text-dim cursor-pointer transition duration-150 enabled:hover:bg-border enabled:hover:text-bright disabled:cursor-not-allowed disabled:opacity-50"
-          v-app-title="t('common.restoreFolder')"
-          @click="resetActiveFolder"
+          v-app-title="t('common.changeFolderFor', { target: activeTab === 'repaked' ? t('unpaked.repaks') : t('unpaked.openUnpakeds') })"
+          :disabled="state.actionRunning || state.listsRefreshing"
+          @click="changeActiveFolder"
         >
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M13 8a5 5 0 1 1-1.5-3.5" />
-            <path d="M13 2.5V6H9.5" />
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M1.6 4.1a1.1 1.1 0 0 1 1.1-1.1h2.9l1.3 1.5h6.4a1.1 1.1 0 0 1 1.1 1.1v1.6" />
+            <path d="M1.6 4.1v7.6a1.1 1.1 0 0 0 1.1 1.1h5.1" />
+            <path d="m12.4 8.6 2 2-3.9 3.9-2.2.4.4-2.2z" />
           </svg>
         </button>
       </div>
@@ -381,8 +415,18 @@ async function resetActiveFolder(): Promise<void> {
       source="unpaked"
       structure-only
       @close="unpakedModalOpen = false"
+      @done="onUnpakedDone"
     />
 
     <DbModal :open="dbOpen" :initial-db-path="dbInitialPath" @close="dbOpen = false" />
+
+    <ConfirmModal
+      :open="restoreConfirmOpen"
+      :title="t('common.restoreFolderTitle')"
+      :message="t('common.restoreFolderConfirm', { target: activeTab === 'repaked' ? t('unpaked.repaks') : t('unpaked.openUnpakeds') })"
+      :confirm-label="t('common.restoreFolder')"
+      @confirm="resetActiveFolder"
+      @cancel="restoreConfirmOpen = false"
+    />
   </div>
 </template>

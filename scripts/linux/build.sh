@@ -22,7 +22,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 WITH_APPIMAGE=0
 SKIP_INSTALL=0
-SKIP_ICON=0
 TARGETS=""
 DEST=""
 
@@ -30,7 +29,6 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --with-appimage) WITH_APPIMAGE=1; shift ;;
     --skip-install) SKIP_INSTALL=1; shift ;;
-    --skip-icon) SKIP_ICON=1; shift ;;
     --targets) TARGETS="${2:-}"; shift 2 ;;
     --dest) DEST="${2:-}"; shift 2 ;;
     -h | --help) sed -n '2,11p' "${BASH_SOURCE[0]}"; exit 0 ;;
@@ -75,13 +73,9 @@ if [[ "$SKIP_INSTALL" -eq 0 ]]; then
   fi
 fi
 
-# --- 3) Versão / ícone -------------------------------------------------------
+# --- 3) Versão ---------------------------------------------------------------
 VERSION="$(node -p "require('./package.json').version" 2>/dev/null || echo 0.0.0)"
 log "Build Linux $(arch_raw) — $APP_DISPLAY $VERSION ($(distro_label)) — alvos: $TARGETS"
-
-if [[ "$SKIP_ICON" -eq 0 ]]; then
-  npm run icon
-fi
 
 # --- 4) Bundle (renderer + main) ---------------------------------------------
 npm run build:app

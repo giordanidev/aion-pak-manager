@@ -1,5 +1,5 @@
 import { BrowserWindow, dialog, ipcMain, shell } from 'electron'
-import { existsSync, mkdirSync } from 'fs'
+import { existsSync, mkdirSync, rmSync, unlinkSync } from 'fs'
 import { readdir, readFile, stat } from 'fs/promises'
 import path from 'path'
 import {
@@ -12,7 +12,13 @@ import {
 	findRootFoldersInFiles,
 	findUnpakedFolders,
 } from '../services/paths'
-import { countEntriesDetailed, countRepakedFiles, listPakDatabases } from '../services/counts'
+import {
+	countEntriesDetailed,
+	countRepakedFiles,
+	listPakDatabases,
+	clearEntryCountCache,
+	removeEntryCountCacheEntry,
+} from '../services/counts'
 import { listFilesInPak } from '../core/unpak'
 import {
 	addFilesToRepakedPak,
@@ -312,6 +318,7 @@ export function registerIpcHandlers(getMainWindow: GetMainWindow): void {
 						: isRecord(payload) && payload.kind === 'repaked'
 							? 'repaked'
 							: 'pak'
+			const force = isRecord(payload) && payload.force === true
 			const base = path.resolve(
 				isRecord(payload) && typeof payload.base === 'string' && payload.base.length > 0
 					? payload.base
@@ -321,8 +328,63 @@ export function registerIpcHandlers(getMainWindow: GetMainWindow): void {
 				const resolved = path.resolve(entryPath)
 				return resolved.startsWith(base + path.sep)
 			})
-			const detailed = await countEntriesDetailed(safePaths, kind)
+			const detailed = await countEntriesDetailed(safePaths, kind, { force })
 			return { success: true, counts: detailed.counts, sizes: detailed.sizes }
+		} catch (error) {
+			return { success: false, error: errorMessage(error) }
+		}
+	})
+
+	ipcMain.handle('clear-entry-count-cache', async () => {
+		try {
+			clearEntryCountCache()
+			return { success: true }
+		} catch (error) {
+			return { success: false, error: errorMessage(error) }
+		}
+	})
+
+	ipcMain.handle('delete-managed-path', async (_event, payload) => {
+		try {
+			const targetPath = isRecord(payload) && typeof payload.path === 'string' ? payload.path : ''
+			if (!targetPath) throw new Error('No path provided')
+			const resolved = path.resolve(targetPath)
+			const allowedBases = [
+				path.resolve(PAK_DIR),
+				path.resolve(REPAKED_DIR),
+				path.resolve(UNPAKED_DIR),
+				...settingsCustomBases(),
+			]
+			if (isRecord(payload) && typeof payload.base === 'string' && payload.base.length > 0) {
+				allowedBases.push(path.resolve(payload.base))
+			}
+			const parentBase = allowedBases.find(
+				(base) => resolved === base || resolved.startsWith(base + path.sep),
+			)
+			if (!parentBase) {
+				throw new Error('Access denied: path outside managed directories')
+			}
+			if (resolved === parentBase) {
+				throw new Error('Cannot delete the managed root directory')
+			}
+			const entry = await stat(resolved).catch(() => null)
+			if (!entry) throw new Error('Path not found')
+			if (entry.isDirectory()) {
+				rmSync(resolved, { recursive: true, force: true })
+				// Legacy sibling aggregate DB next to an UnPAKED folder.
+				const legacyDb = `${resolved}.db`
+				if (existsSync(legacyDb)) {
+					try {
+						unlinkSync(legacyDb)
+					} catch {
+						// ignore sibling db cleanup failures
+					}
+				}
+			} else {
+				unlinkSync(resolved)
+			}
+			removeEntryCountCacheEntry(resolved)
+			return { success: true }
 		} catch (error) {
 			return { success: false, error: errorMessage(error) }
 		}
@@ -505,6 +567,7 @@ export function registerIpcHandlers(getMainWindow: GetMainWindow): void {
 					inputFolder,
 					includeNonPak: isRecord(payload) && 'includeNonPak' in payload ? Boolean(payload.includeNonPak) : true,
 					overwrite: isRecord(payload) ? Boolean(payload.overwrite) : false,
+					createPakFolder: isRecord(payload) && 'createPakFolder' in payload ? Boolean(payload.createPakFolder) : false,
 				},
 				{
 					onProgress,

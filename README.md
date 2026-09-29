@@ -9,33 +9,46 @@ Node.js and shared with a headless CLI.
 
 ## Features
 
-- **PAKS** — lists every `*.pak` under `/PAKS/pak`, lets you inspect a package's
-  contents before extracting, run an individual UnPAK of selected packages, or
-  **Extract full folder** (recursive): each `.pak`'s files land straight in the
-  mirrored folder (no `name.pak/` wrappers) together with a single aggregate
-  `.db`. Optional **UnPAK + Decrypt** does both in one pass.
+- **PAKS** — lists every first-level folder and `*.pak` under `/PAKS/pak` (or a
+  custom folder), lets you inspect contents before extracting, run UnPAK on the
+  selection, or **Extract full folder** (recursive): each `.pak`'s files land
+  straight in the mirrored folder (no `name.pak/` wrappers) together with a
+  single aggregate `.db`. Optional **UnPAK + Decrypt** does both in one pass.
+  Activity log reports extracted vs moved file counts and sizes.
 - **UnPAKEDS / RePAKEDS** — decrypt or RePAK selected extract folders, then open
   a rebuilt `.pak` (tree + search) and add, replace or delete entries **without
-  recompressing** the untouched data.
+  recompressing** the untouched data. Folder / package views can delete the
+  whole item from disk (with confirmation); the file-count cache in
+  `settings.json` is cleared for that path.
 - **Drag & drop into RePAKEDS** — drag files or folders from the OS onto the
   rebuilt `.pak` tree (drop anywhere, or onto a specific folder to target it) to
   add or replace entries in the RePAKEDS list; existing names prompt to
   overwrite or skip.
-- **View PAK contents** — open a `.pak` and browse its file tree, with
-  per-folder selection, before committing to an extraction.
+- **View PAK / folder contents** — open a `.pak` or extract folder and browse
+  its file tree, with per-folder selection, before committing to an extraction.
+- **Select all** — toggle above each list selects or clears every row in that
+  list.
 - **File structure** — browse the aggregate databases under `/PAKS/unpaked`.
 - **Conflict handling** — when a file already exists you choose **Replace**,
   **Skip**, or apply the same answer to everything that follows; cancelling
   leaves the target untouched.
-- **Custom source folders** — point any list at another directory (e.g. the
-  game's data folder) with the folder button next to the tab; the path is shown
-  above the list and can be restored to the default.
+- **Custom source folders** — point PAKS / UnPAKEDS / RePAKEDS at another
+  directory (e.g. the game's data folder). Change the path beside the list
+  header; restore the default with confirmation. Logs and progress text use the
+  active path, not a hardcoded `/PAKS/...` label.
+- **Parallel file counts + cache** — folder / `.pak` sizes and file counts run
+  on a worker pool (large folders are split by first-level subfolders). Results
+  are cached in `settings.json` (`entryCountCache`) and reused until the path's
+  `mtime` changes. Settings → **Recount all** clears the cache and forces a
+  fresh count.
 - **CPU effort control** — pick how many logical cores the worker pool may use
   (Low/Medium/High/Extreme, or Manual thread count) from Settings.
 - **Progress & activity log** — live progress bar with elapsed time, ETA and
-  speed, plus a toggleable per-file log and a fullscreen modal.
-- **Update check** — the app compares its version against the latest GitHub
-  Release and links straight to the download page.
+  windowed MB/s speed, a “preparing extraction…” stage before work starts, a
+  toggleable per-file log and a fullscreen modal.
+- **Update check / auto-update** — the app compares its version against the
+  latest GitHub Release; Windows NSIS and Linux AppImage can download and
+  install in place.
 - **i18n** — pt-BR, en-US, es-ES.
 
 ## Requirements
@@ -74,7 +87,6 @@ appears in `PAKS/unpaked` and `PAKS/repaked`.
 | `npm run dist:linux:wsl` | Windows → WSL2: builds the Ubuntu and Fedora artifacts |
 | `npm run dist:linux:wsl:ubuntu` | Windows → WSL2 Ubuntu (`.deb` + AppImage) |
 | `npm run dist:linux:wsl:fedora` | Windows → WSL2 Fedora (`.rpm`) |
-| `npm run icon` | Regenerate `build/icon.ico` / `build/icon.png` from `frontend/assets/icon.svg` |
 | `npm run typecheck` | Type-check backend (`tsc`) and frontend (`vue-tsc`) |
 | `npm run cli` / `npm run unpak` / `npm run repak` | Headless CLI (see below) |
 
@@ -83,37 +95,30 @@ appears in `PAKS/unpaked` and `PAKS/repaked`.
 The same engine the desktop app uses is available headless, so UnPAK / RePAK /
 decrypt can be scripted.
 
-### Installed app (recommended for end users)
+### Installed / portable app
 
-The Windows installer ships a console wrapper, `aion-pak.cmd`, next to the
-executable:
+Pass a CLI command directly to the executable (no window opens):
 
 ```bat
-aion-pak unpak "C:\Aion\data\data.pak"
-aion-pak repak "C:\extracted\data_ptbr" -o "C:\out\data_ptbr.pak"
-aion-pak decrypt "C:\extracted\data_ptbr"
+"aion-pak-manager.exe" unpak "C:\Aion\data\data.pak"
+"aion-pak-manager.exe" repak "C:\extracted\data_ptbr" -o "C:\out\data_ptbr.pak"
+"aion-pak-manager.exe" decrypt "C:\extracted\data_ptbr"
 ```
 
-Add the install folder to `PATH` (or run `.\aion-pak …`) to use it anywhere.
-Under the hood it invokes the app executable with the `cli` subcommand, which
-runs headless — no window opens.
-
-Because the Windows build is a GUI application with no console attached, calling
-the executable directly requires redirecting the output:
+Because the Windows build is a GUI application with no console attached, redirect
+stdout/stderr if you need to capture the log:
 
 ```bat
-"aion-pak-manager.exe" cli unpak "C:\Aion\data\data.pak" > out.log 2>&1
+"aion-pak-manager.exe" unpak "C:\Aion\data\data.pak" > out.log 2>&1
 type out.log
 ```
 
-The portable build is a single file with no wrapper beside it; use the redirect
-form above, or the installed version for the `aion-pak` wrapper.
+A legacy `cli` prefix (`aion-pak-manager.exe cli unpak …`) is still accepted.
 
 ### From the source tree (development)
 
-`cli` is the name of the headless entry point. In the source tree it is
-`npm run cli -- …`; the `pre*` scripts build `.build/backend/cli.js` on first
-use:
+In the source tree use `npm run cli -- …`; the `pre*` scripts build
+`.build/backend/cli.js` on first use:
 
 ```bash
 npm run cli -- unpak PAKS/pak/data.pak
@@ -130,10 +135,10 @@ node .build/backend/cli.js unpak PAKS/pak/data.pak
 ### Usage
 
 ```
-cli unpak <pak|folder...> [-o <dir>] [--decrypt] [--effort <mode>] [--threads <n>]
-cli repak <folder...> [-o <pak|dir>] [--simple-zip] [--effort <mode>] [--threads <n>]
-cli decrypt <folder...> [--effort <mode>] [--threads <n>]
-cli help
+unpak <pak|folder...> [-o <dir>] [--decrypt] [--effort <mode>] [--threads <n>]
+repak <folder...> [-o <pak|dir>] [--simple-zip] [--effort <mode>] [--threads <n>]
+decrypt <folder...> [--effort <mode>] [--threads <n>]
+help
 ```
 
 | Option | Description |
@@ -242,7 +247,6 @@ Or through npm: `npm run dist:linux` / `npm run dist:linux:appimage`.
 | `--with-appimage` | Adds the portable `AppImage` to the distro-native installer |
 | `--targets "deb rpm AppImage"` | Explicit electron-builder Linux targets |
 | `--skip-install` | Skip `npm ci` (dependencies already present) |
-| `--skip-icon` | Skip `npm run icon` (reuse `build/icon.*`) |
 | `--dest <dir>` | Output folder (default: `<repo>/release`) |
 | `AION_BUILD_DIR` | Linux-side work dir (default: `~/aion-pak-manager-build`) |
 
@@ -321,22 +325,27 @@ to the executable):
   wrappers are removed after a successful repack); plain RePAK packs a folder
   as-is. Both write to `PAKS/repaked`.
 
-Each list can be pointed at a custom directory (persisted locally); the header
-shows `Folder: <path>` and a button restores the default.
+Each list can be pointed at a custom directory (persisted in `settings.json` and
+local storage). The path is shown above the list; a restore control resets it to
+the default after confirmation. Logs and summaries interpolate the active path.
+
+File / folder counts are cached under `entryCountCache` in `settings.json`
+(keyed by absolute path + `mtime`). Deleting an item from the contents modal
+removes its cache entry. Use Settings → **Recount all** to clear the whole
+cache.
 
 ## Project structure
 
 ```
-frontend/    Vue 3 renderer (UI, i18n, assets/icon.svg)
+frontend/    Vue 3 renderer (UI, i18n, assets/icon.png + icon.ico)
 backend/     Electron main, IPC, services, workers, core/parse
   cli/       Headless CLI entry (unpak / repak / decrypt)
   core/      AION unpak, repak, decrypt (Electron-free)
   parse/     Binary XML, HTML crypt, PAK codec, format detection
-  services/  Paths, counts, settings, worker pools
-  workers/   Piscina worker entries
+  services/  Paths, counts (+ cache), settings, worker pools
+  workers/   Piscina worker entries (unpak / decrypt / repak / count)
 shared/      IPC contracts shared by renderer + main + preload
-build/       icon.ico / icon.png (generated) + aion-pak.cmd wrapper
-scripts/     Build helpers (version bump, icon, CLI bootstrap)
+scripts/     Build helpers (version bump, worker bundle, CLI bootstrap)
   linux/     Native Linux builder (build.sh + _common.sh)
   dist-linux-wsl.mjs   Windows -> WSL2 driver
 ```
@@ -344,8 +353,9 @@ scripts/     Build helpers (version bump, icon, CLI bootstrap)
 ## Notes
 
 - Targets **Aion 1** PAKs only (default AION pak encoding).
-- UnPAK / decrypt / RePAK run in Piscina workers so the UI never blocks.
-- `build/icon.ico` is generated from `frontend/assets/icon.svg` and is used by
-  the installer, the portable build and the dev window.
+- UnPAK / decrypt / RePAK / file counting run in Piscina workers so the UI never
+  blocks.
+- `frontend/assets/icon.png` / `icon.ico` are the committed app icons (UI,
+  Linux packaging, Windows installer / portable / dev window).
 - RePAKED editing rewrites only what changes: new/replaced entries are
   compressed, kept entries are copied verbatim.

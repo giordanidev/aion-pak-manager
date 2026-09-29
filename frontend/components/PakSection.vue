@@ -5,10 +5,11 @@ import type { ExtractFolderPayload, OperationFailure, PakEntry } from '../../sha
 import { getShowFileNames, useElectron } from '../composables/useElectron'
 import { useAppState, basename, truncateMiddle, formatBytes } from '../composables/useAppState'
 import PakContentsModal from './PakContentsModal.vue'
+import ConfirmModal from './ConfirmModal.vue'
 
 const { t } = useI18n()
 const electron = useElectron()
-const { state, log, clearLog, setProgress, resetProgressBar, setSummary, setActionRunning, refreshLists, setCustomDir, dirLabel } = useAppState()
+const { state, log, clearLog, setProgress, resetProgressBar, setProgressBatch, setSummary, setActionRunning, refreshLists, setCustomDir, dirLabel } = useAppState()
 
 interface PakListEntry extends PakEntry {
   isDir: boolean
@@ -16,8 +17,10 @@ interface PakListEntry extends PakEntry {
 
 const selectedPaths = ref<string[]>([])
 const decryptAfterUnpak = ref(false)
+const createPakFolder = ref(false)
 const pakContentsOpen = ref(false)
 const pakContentsPath = ref<string | null>(null)
+const restoreConfirmOpen = ref(false)
 
 // Single merged list: first-level folders of /PAKS/pak followed by loose .pak
 // files, so the whole extraction target is visible without a mode toggle.
@@ -26,6 +29,15 @@ const entries = computed<PakListEntry[]>(() => [
   ...state.pakFiles.map((entry) => ({ ...entry, isDir: false })),
 ])
 const listCount = (): number => entries.value.length
+
+const allSelected = computed({
+  get: () =>
+    entries.value.length > 0 &&
+    entries.value.every((entry) => selectedPaths.value.includes(entry.fullPath)),
+  set: (value: boolean) => {
+    selectedPaths.value = value ? entries.value.map((entry) => entry.fullPath) : []
+  },
+})
 
 function formatEntrySize(entry: PakListEntry): string {
   return entry.isDir ? formatBytes(entry.sizeBytes) : ''
@@ -72,8 +84,14 @@ async function changePakFolder(): Promise<void> {
 
 async function resetPakFolder(): Promise<void> {
   if (state.actionRunning || state.listsRefreshing) return
+  restoreConfirmOpen.value = false
   setCustomDir('pak', '')
   await refreshLists()
+}
+
+function requestResetPakFolder(): void {
+  if (state.actionRunning || state.listsRefreshing || !state.customDirs.pak) return
+  restoreConfirmOpen.value = true
 }
 
 async function unpackSelected(): Promise<void> {
@@ -90,6 +108,7 @@ async function unpackSelected(): Promise<void> {
   clearLog()
   try {
     let totalExtracted = 0
+    let folderHadFailures = false
     let canceled = false
 
     for (let i = 0; i < folders.length; i++) {
@@ -98,13 +117,19 @@ async function unpackSelected(): Promise<void> {
         inputFolder,
         includeNonPak: true,
         overwrite: false,
+        createPakFolder: createPakFolder.value,
         showFileProgress: getShowFileNames(),
         unpakedDir: state.customDirs.unpaked || undefined,
         pakDir: state.customDirs.pak || undefined,
       }
 
-      setSummary(t('pak.extractingFolder', { i: i + 1, total: folders.length }), 'info')
-      log(t('pak.extractingFolderLog', { i: i + 1, total: folders.length, folder: inputFolder }))
+      setProgressBatch(
+        folders.length > 1
+          ? { index: i + 1, total: folders.length, label: basename(inputFolder) }
+          : null,
+      )
+      setSummary(t('pak.preparingExtract'), 'info')
+      log(t('pak.preparingExtractLog', { folder: inputFolder }))
       resetProgressBar()
       const result = await electron.extractFolder(payload)
       if (result.canceled) {
@@ -119,13 +144,44 @@ async function unpackSelected(): Promise<void> {
         break
       }
       const extracted = result.results?.paksExtracted ?? 0
+      const copied = result.results?.otherFilesCopied ?? 0
+      const extractedFiles = result.results?.extractedFiles ?? 0
+      const extractedBytes = result.results?.extractedBytes ?? 0
+      const movedBytes = result.results?.otherFilesBytes ?? 0
       const skipped = result.results?.skippedExisting ?? []
+      const failed = result.results?.failedPaks ?? []
       totalExtracted += extracted
       const skippedNote = skipped.length > 0 ? ` ${t('pak.skippedIgnored', { n: skipped.length })}` : ''
       log(`${t('pak.extractDoneLog', { n: extracted, out: result.results?.outputFolder })}${skippedNote}`, 'success')
+      log(
+        t('pak.extractedFilesLog', {
+          count: extractedFiles,
+          size: formatBytes(extractedBytes) || '0 B',
+        }),
+        'success',
+      )
+      log(
+        t('pak.movedFilesLog', {
+          count: copied,
+          size: formatBytes(movedBytes) || '0 B',
+        }),
+        'success',
+      )
+      if (failed.length > 0) {
+        folderHadFailures = true
+        for (const item of failed.slice(0, 20)) {
+          log(t('pak.failedItem', { name: item.relPakPath, error: item.error }), 'error')
+        }
+        if (failed.length > 20) {
+          log(t('pak.failedMore', { n: failed.length - 20 }), 'error')
+        }
+        setSummary(t('pak.partialSummary', { ok: extracted, fail: failed.length }), 'error')
+      }
     }
 
     if (!canceled && paks.length > 0) {
+      // Clear folder batch so multi-pak progress uses packageIndex from IPC.
+      setProgressBatch(null)
       const shouldDecrypt = decryptAfterUnpak.value
       const actionText = shouldDecrypt ? t('pak.extractingDecrypting') : t('pak.extracting')
       resetProgressBar()
@@ -172,13 +228,14 @@ async function unpackSelected(): Promise<void> {
       }
     }
 
-    if (!canceled && folders.length > 0 && paks.length === 0) {
-      setSummary(t('pak.extractedSummary', { n: totalExtracted, m: folders.length }), 'success')
+    if (!canceled && !folderHadFailures && folders.length > 0 && paks.length === 0) {
+      setSummary(t('pak.extractedSummary', { n: totalExtracted, m: folders.length, dir: dirLabel('unpaked') }), 'success')
     }
   } catch (err) {
     log(t('pak.unexpectedLog', { error: err instanceof Error ? err.message : String(err) }), 'error')
     setSummary(t('pak.unexpected'), 'error')
   } finally {
+    setProgressBatch(null)
     setActionRunning(false)
     setProgress(0, t('progress.idle'))
     selectedPaths.value = []
@@ -191,16 +248,17 @@ async function unpackSelected(): Promise<void> {
   <div class="flex min-h-0 flex-col overflow-hidden rounded-xl border border-border bg-card p-3.5 shadow-[0_2px_18px_rgba(0,0,0,0.25)]">
     <div class="mb-1 flex flex-none items-center justify-between gap-3">
       <h2 class="m-0 text-[17px] font-bold text-bright">{{ t('pak.title') }}</h2>
-      <div class="flex items-center gap-3">
+      <div class="flex items-center gap-2">
         <button
+          v-if="state.customDirs.pak"
           class="box-border inline-flex h-[30px] w-[30px] min-w-[30px] items-center justify-center rounded-lg border border-border bg-hover p-0 text-dim cursor-pointer transition duration-150 enabled:hover:bg-border enabled:hover:text-bright disabled:cursor-not-allowed disabled:opacity-50"
-          v-app-title="t('common.changeFolderFor', { target: t('pak.openPaks') })"
-          @click="changePakFolder"
+          v-app-title="t('common.restoreFolder')"
+          :disabled="state.actionRunning || state.listsRefreshing"
+          @click="requestResetPakFolder"
         >
-          <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M1.6 4.1a1.1 1.1 0 0 1 1.1-1.1h2.9l1.3 1.5h6.4a1.1 1.1 0 0 1 1.1 1.1v1.6" />
-            <path d="M1.6 4.1v7.6a1.1 1.1 0 0 0 1.1 1.1h5.1" />
-            <path d="m12.4 8.6 2 2-3.9 3.9-2.2.4.4-2.2z" />
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M13 8a5 5 0 1 1-1.5-3.5" />
+            <path d="M13 2.5V6H9.5" />
           </svg>
         </button>
         <button
@@ -214,16 +272,26 @@ async function unpackSelected(): Promise<void> {
       </div>
     </div>
     <div class="mt-1 mb-3 flex items-center gap-2">
+      <label
+        v-if="state.pakLoaded && entries.length > 0"
+        class="relative inline-flex h-5 w-9 flex-none cursor-pointer select-none items-center has-[:disabled]:pointer-events-none has-[:disabled]:opacity-50"
+        v-app-title="t('common.selectAll')"
+      >
+        <input type="checkbox" class="peer sr-only" v-model="allSelected" :disabled="state.actionRunning" />
+        <span class="h-5 w-9 rounded-full border border-border bg-card transition-colors peer-checked:border-accent peer-checked:bg-accent/25"></span>
+        <span class="pointer-events-none absolute left-0.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 rounded-full bg-[#e9e9ff] transition-all peer-checked:left-[18px] peer-checked:bg-accent"></span>
+      </label>
       <div class="min-w-0 flex-1 truncate text-sm text-dim" :title="pakDir">{{ t('pak.folderPath', { path: pakDirShown }) }}</div>
       <button
-        v-if="state.customDirs.pak"
         class="box-border inline-flex h-[26px] w-[26px] min-w-[26px] flex-none items-center justify-center rounded-lg border border-border bg-hover p-0 text-dim cursor-pointer transition duration-150 enabled:hover:bg-border enabled:hover:text-bright disabled:cursor-not-allowed disabled:opacity-50"
-        v-app-title="t('common.restoreFolder')"
-        @click="resetPakFolder"
+        v-app-title="t('common.changeFolderFor', { target: t('pak.openPaks') })"
+        :disabled="state.actionRunning || state.listsRefreshing"
+        @click="changePakFolder"
       >
-        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="M13 8a5 5 0 1 1-1.5-3.5" />
-          <path d="M13 2.5V6H9.5" />
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M1.6 4.1a1.1 1.1 0 0 1 1.1-1.1h2.9l1.3 1.5h6.4a1.1 1.1 0 0 1 1.1 1.1v1.6" />
+          <path d="M1.6 4.1v7.6a1.1 1.1 0 0 0 1.1 1.1h5.1" />
+          <path d="m12.4 8.6 2 2-3.9 3.9-2.2.4.4-2.2z" />
         </svg>
       </button>
     </div>
@@ -276,6 +344,15 @@ async function unpackSelected(): Promise<void> {
     <div class="flex flex-none items-center justify-end gap-3">
       <label
         class="relative inline-flex cursor-pointer select-none items-center gap-2 text-[13px] text-text has-[:disabled]:pointer-events-none has-[:disabled]:opacity-50"
+        v-app-title="t('pak.createPakFolderHint')"
+      >
+        <input type="checkbox" class="peer sr-only" v-model="createPakFolder" :disabled="state.actionRunning" />
+        <span class="h-5 w-9 flex-none rounded-full border border-border bg-card transition-colors peer-checked:border-accent peer-checked:bg-accent/25"></span>
+        <span class="pointer-events-none absolute left-0.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 rounded-full bg-[#e9e9ff] transition-all peer-checked:left-[18px] peer-checked:bg-accent"></span>
+        <span>{{ t('pak.createPakFolder') }}</span>
+      </label>
+      <label
+        class="relative inline-flex cursor-pointer select-none items-center gap-2 text-[13px] text-text has-[:disabled]:pointer-events-none has-[:disabled]:opacity-50"
         v-app-title="t('pak.decryptAfterHint')"
       >
         <input type="checkbox" class="peer sr-only" v-model="decryptAfterUnpak" :disabled="state.actionRunning" />
@@ -294,6 +371,14 @@ async function unpackSelected(): Promise<void> {
       :pak-path="pakContentsPath"
       @close="pakContentsOpen = false"
       @done="onPakContentsDone"
+    />
+    <ConfirmModal
+      :open="restoreConfirmOpen"
+      :title="t('common.restoreFolderTitle')"
+      :message="t('common.restoreFolderConfirm', { target: t('pak.openPaks') })"
+      :confirm-label="t('common.restoreFolder')"
+      @confirm="resetPakFolder"
+      @cancel="restoreConfirmOpen = false"
     />
   </div>
 </template>

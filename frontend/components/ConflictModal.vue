@@ -2,10 +2,12 @@
 import { onBeforeUnmount, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { ConflictChoice, ConflictRequest } from '../../shared/api-types'
+import { useAppState } from '../composables/useAppState'
 
 const props = defineProps<{ request: ConflictRequest | null }>()
 const emit = defineEmits<{ (e: 'choose', choice: ConflictChoice): void }>()
 const { t } = useI18n()
+const { dirLabel } = useAppState()
 
 function onKeydown(event: KeyboardEvent): void {
   if (event.key === 'Escape' && props.request) {
@@ -37,7 +39,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
 
       <div class="flex flex-col gap-4 px-5 py-4">
         <p class="m-0 break-words text-sm text-text">
-          {{ t('pak.conflictBody', { name: request.packageName }) }}
+          {{ t('pak.conflictBody', { name: request.packageName, dir: dirLabel('unpaked') }) }}
         </p>
         <p v-if="request.fileCount != null" class="m-0 text-xs text-dim">
           {{ t('pak.conflictFiles', { n: request.fileCount }) }}
