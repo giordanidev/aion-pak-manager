@@ -21,6 +21,7 @@ const unpakedModalOpen = ref(false)
 const unpakedModalPath = ref<string | null>(null)
 const dbOpen = ref(false)
 const dbInitialPath = ref<string | null>(null)
+const dbFolderPath = ref<string | null>(null)
 const restoreConfirmOpen = ref(false)
 
 const allUnpakedSelected = computed({
@@ -32,10 +33,18 @@ const allUnpakedSelected = computed({
   },
 })
 
-function openFolderDb(dbPath: string): void {
-  if (state.actionRunning) return
-  dbInitialPath.value = dbPath
+function openFolderDb(folder: PakEntry): void {
+  if (state.actionRunning || !folder.dbPath) return
+  dbInitialPath.value = folder.dbPath
+  dbFolderPath.value = folder.fullPath
   dbOpen.value = true
+}
+
+async function onDbDone(): Promise<void> {
+  dbOpen.value = false
+  dbInitialPath.value = null
+  dbFolderPath.value = null
+  await refreshLists()
 }
 
 function openRepakedContents(pak: PakEntry): void {
@@ -323,7 +332,7 @@ function requestResetActiveFolder(): void {
               class="inline-flex h-6 w-6 min-w-6 flex-none items-center justify-center rounded-md border border-border bg-card p-0 text-text cursor-pointer transition duration-150 enabled:hover:bg-hover disabled:cursor-not-allowed disabled:opacity-50"
               :disabled="state.actionRunning"
               v-app-title="t('unpaked.dbStructureHint')"
-              @click.stop="openFolderDb(folder.dbPath)"
+              @click.stop="openFolderDb(folder)"
             >
               <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                 <ellipse cx="8" cy="3.5" rx="5" ry="2" stroke="currentColor" stroke-width="1.6" />
@@ -418,7 +427,13 @@ function requestResetActiveFolder(): void {
       @done="onUnpakedDone"
     />
 
-    <DbModal :open="dbOpen" :initial-db-path="dbInitialPath" @close="dbOpen = false" />
+    <DbModal
+      :open="dbOpen"
+      :initial-db-path="dbInitialPath"
+      :folder-path="dbFolderPath"
+      @close="dbOpen = false"
+      @done="onDbDone"
+    />
 
     <ConfirmModal
       :open="restoreConfirmOpen"

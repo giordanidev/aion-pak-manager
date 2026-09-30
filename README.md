@@ -29,6 +29,9 @@ Node.js and shared with a headless CLI.
 - **Select all** — toggle above each list selects or clears every row in that
   list.
 - **File structure** — browse the aggregate databases under `/PAKS/unpaked`.
+  Select files or folders and **RePAK** only that selection: each touched `.pak`
+  is rebuilt under RePAKEDS at its original relative path (parent folders
+  included). The extracted folder stays in place.
 - **Conflict handling** — when a file already exists you choose **Replace**,
   **Skip**, or apply the same answer to everything that follows; cancelling
   leaves the target untouched.
@@ -45,7 +48,12 @@ Node.js and shared with a headless CLI.
   (Low/Medium/High/Extreme, or Manual thread count) from Settings.
 - **Progress & activity log** — live progress bar with elapsed time, ETA and
   windowed MB/s speed, a “preparing extraction…” stage before work starts, a
-  toggleable per-file log and a fullscreen modal.
+  toggleable per-file log and a fullscreen modal. The summary **Total** and its
+  average speed are the uncompressed bytes written to disk, once per extracted
+  file. Parallel workers no longer add the skipped span of the `.pak` (that
+  used to report several times the folder size). When several archives write
+  the same relative path, each write is still counted and the folder keeps the
+  last file.
 - **Update check / auto-update** — the app compares its version against the
   latest GitHub Release; Windows NSIS and Linux AppImage can download and
   install in place.
@@ -324,6 +332,8 @@ to the executable):
 - Reconstruct rebuilds each `.pak` from that manifest (v4 sources are kept, v3
   wrappers are removed after a successful repack); plain RePAK packs a folder
   as-is. Both write to `PAKS/repaked`.
+- Selective RePAK (file structure) packs only the chosen manifest files into
+  `PAKS/repaked/<relPakPath>`, recreating the folders up to that `.pak`.
 
 Each list can be pointed at a custom directory (persisted in `settings.json` and
 local storage). The path is shown above the list; a restore control resets it to

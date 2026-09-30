@@ -245,6 +245,14 @@
     "files": "{n} arquivos",
     "close": "Fechar",
     "loadFail": "Falha ao carregar databases: {error}",
-    "readFail": "Falha ao ler database: {error}"
+    "readFail": "Falha ao ler database: {error}",
+    "repakHint": "Reconstrói somente os arquivos selecionados. As pastas até o .pak são recriadas em RePAKEDS.",
+    "repakingN": "Reconstruindo {n} arquivo(s) em {paks} pak(s)...",
+    "repakingNLog": "Reconstruindo {n} arquivo(s) selecionados a partir do database",
+    "repakDone": "Reconstrução seletiva concluída. {ok} pak(s), {fail} falha(s).",
+    "repakFailItem": "Falhou {pak}: {error}",
+    "repakAllOk": "{n} pak(s) reconstruído(s) em {dir}.",
+    "repakFailTitle": "Falha no RePAK seletivo",
+    "repakPartial": "{ok} pak(s) reconstruído(s), {fail} falha(s)."
   }
 }

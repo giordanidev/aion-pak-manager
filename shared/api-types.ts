@@ -292,6 +292,18 @@ export interface RepackUnpakedPayload {
 	unpakedDir?: string;
 }
 
+/**
+ * Selective reconstruct of an aggregate extract folder.
+ * `entries` are tree keys `${relPakPath}/${fileInsidePak}` taken from the DB manifest.
+ */
+export interface RepackUnpakedSelectionPayload {
+	folderPath: string;
+	entries: string[];
+	showFileProgress?: boolean;
+	repakedDir?: string;
+	unpakedDir?: string;
+}
+
 export interface AddFilesToPakPayload {
 	pakPath: string;
 	sourcePaths: string[];
@@ -346,6 +358,7 @@ export interface ElectronApi {
 	extractFolder(payload: ExtractFolderPayload): Promise<ExtractFolderResult>;
 	decryptUnpaked(paths: string[], opts?: ProgressOptions): Promise<OperationResult>;
 	repackUnpaked(payload: RepackUnpakedPayload): Promise<OperationResult>;
+	repackUnpakedSelection(payload: RepackUnpakedSelectionPayload): Promise<OperationResult>;
 	addFilesToPak(payload: AddFilesToPakPayload): Promise<OperationResult>;
 	deletePakEntries(payload: DeletePakEntriesPayload): Promise<OperationResult>;
 	cancelAction(): Promise<CancelActionResult>;

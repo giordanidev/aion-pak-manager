@@ -583,7 +583,7 @@ async function extractZipPakToFolder(
 			current += 1;
 			if (progressCallback) {
 				const percent = Math.round((current / Math.max(total, 1)) * 1000) / 10;
-				progressCallback({ stage: 'unpack', current, total, percent, fileName, outputFolder, bytesDelta: entry.csize });
+				progressCallback({ stage: 'unpack', current, total, percent, fileName, outputFolder, bytesDelta: fileData.length });
 			}
 		}
 	} finally {
@@ -649,7 +649,6 @@ export async function extractPakToFolder(
 		const total = filter ? filter.size : await countPakEntries(input, fileSize, shouldAbort);
 		let current = 0;
 		let offset = 0;
-		let reportedOffset = 0;
 		let iter = 0;
 
 		while (offset < fileSize) {
@@ -725,10 +724,8 @@ export async function extractPakToFolder(
 					mkdirSync(destination, { recursive: true });
 					current += 1;
 					if (progressCallback) {
-						const bytesDelta = offset - reportedOffset;
-						reportedOffset = offset;
 						const percent = Math.round((current / Math.max(total, 1)) * 1000) / 10;
-						progressCallback({ stage: 'unpack', current, total, percent, fileName, outputFolder, bytesDelta });
+						progressCallback({ stage: 'unpack', current, total, percent, fileName, outputFolder });
 					}
 					continue;
 				}
@@ -737,10 +734,8 @@ export async function extractPakToFolder(
 				writeFileSync(destination, fileData);
 				current += 1;
 				if (progressCallback) {
-					const bytesDelta = offset - reportedOffset;
-					reportedOffset = offset;
 					const percent = Math.round((current / Math.max(total, 1)) * 1000) / 10;
-					progressCallback({ stage: 'unpack', current, total, percent, fileName, outputFolder, bytesDelta });
+					progressCallback({ stage: 'unpack', current, total, percent, fileName, outputFolder, bytesDelta: fileData.length });
 				}
 				if (shouldAbort()) {
 					throw new Error('Operation canceled');

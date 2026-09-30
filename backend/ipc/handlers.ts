@@ -35,6 +35,7 @@ import {
 	decryptTranslations,
 	extractFolder,
 	repackTranslations,
+	repackUnpakedSelection,
 } from '../services/translation-service'
 import { loadSettings, saveSettings } from '../services/settings'
 import { totalCpuThreads } from '../services/threads'
@@ -601,6 +602,26 @@ export function registerIpcHandlers(getMainWindow: GetMainWindow): void {
 		const { paths, showFileProgress } = extractPathsAndShowFileProgress(payload)
 		return runOperation(getMainWindow, showFileProgress, (onProgress, signal) =>
 			decryptTranslations(paths, { onProgress, signal }),
+		)
+	})
+
+	ipcMain.handle('repack-unpaked-selection', (_event, payload) => {
+		const folderPath = isRecord(payload) && typeof payload.folderPath === 'string' ? payload.folderPath : ''
+		const entries =
+			isRecord(payload) && Array.isArray(payload.entries)
+				? (payload.entries as unknown[]).filter((value): value is string => typeof value === 'string' && value.length > 0)
+				: []
+		const showFileProgress =
+			isRecord(payload) && typeof payload.showFileProgress === 'boolean'
+				? payload.showFileProgress
+				: true
+		return runOperation(getMainWindow, showFileProgress, (onProgress, signal) =>
+			repackUnpakedSelection(folderPath, entries, {
+				onProgress,
+				signal,
+				unpakedDir: resolveUnpakedDir(payload),
+				repakedDir: resolveRepakedDir(payload),
+			}),
 		)
 	})
 

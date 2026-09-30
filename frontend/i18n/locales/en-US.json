@@ -245,6 +245,14 @@
     "files": "{n} files",
     "close": "Close",
     "loadFail": "Failed to load databases: {error}",
-    "readFail": "Failed to read database: {error}"
+    "readFail": "Failed to read database: {error}",
+    "repakHint": "Reconstructs only the selected files. Folders up to the .pak are recreated in RePAKEDS.",
+    "repakingN": "Reconstructing {n} file(s) into {paks} pak(s)...",
+    "repakingNLog": "Reconstructing {n} selected file(s) from the database",
+    "repakDone": "Selective reconstruction finished. {ok} pak(s), {fail} failure(s).",
+    "repakFailItem": "Failed {pak}: {error}",
+    "repakAllOk": "{n} pak(s) reconstructed in {dir}.",
+    "repakFailTitle": "Selective RePAK failed",
+    "repakPartial": "{ok} pak(s) reconstructed, {fail} failure(s)."
   }
 }

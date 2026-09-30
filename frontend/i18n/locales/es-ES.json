@@ -245,6 +245,14 @@
     "files": "{n} archivos",
     "close": "Cerrar",
     "loadFail": "Falló la carga de databases: {error}",
-    "readFail": "Falló la lectura del database: {error}"
+    "readFail": "Falló la lectura del database: {error}",
+    "repakHint": "Reconstruye solo los archivos seleccionados. Las carpetas hasta el .pak se recrean en RePAKEDS.",
+    "repakingN": "Reconstruyendo {n} archivo(s) en {paks} pak(s)...",
+    "repakingNLog": "Reconstruyendo {n} archivo(s) seleccionados a partir del database",
+    "repakDone": "Reconstrucción selectiva completada. {ok} pak(s), {fail} fallo(s).",
+    "repakFailItem": "Falló {pak}: {error}",
+    "repakAllOk": "{n} pak(s) reconstruido(s) en {dir}.",
+    "repakFailTitle": "Falló el RePAK selectivo",
+    "repakPartial": "{ok} pak(s) reconstruido(s), {fail} fallo(s)."
   }
 }

@@ -254,7 +254,7 @@ export async function extractChromiumPakToFolder(
 				total,
 				percent,
 				fileName,
-				bytesDelta: resource.size,
+				bytesDelta: payload.length,
 			})
 		}
 		if ((current & 63) === 0) {

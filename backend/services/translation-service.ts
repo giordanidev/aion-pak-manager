@@ -1498,3 +1498,220 @@ export async function repackTranslations(
 
 	return results
 }
+
+function normalizeDbRel(value: string): string {
+	return toPosix(value).replace(/\\/g, '/').replace(/\/+/g, '/').replace(/^\/+/, '').replace(/\/+$/, '')
+}
+
+/**
+ * Reconstruct only the DB manifest files the user selected from one extracted
+ * folder. Each pak is written under the RePAK root at its original `relPakPath`
+ * (parent folders included). Source files stay in place.
+ */
+export async function repackUnpakedSelection(
+	folderPath: string,
+	entries: string[],
+	options: TranslationServiceOptions = {},
+): Promise<TranslationResults> {
+	const onProgress = options.onProgress
+	const signal = options.signal
+	const results: TranslationResults = { success: [], failed: [] }
+	if (!folderPath) throw new Error('No folder provided')
+	if (entries.length === 0) throw new Error('No files selected')
+
+	const selectionAbs = path.resolve(folderPath)
+	const unpakedRoot = options.unpakedDir ? path.resolve(options.unpakedDir) : UNPAKED_DIR
+	const repakedRoot = options.repakedDir ? path.resolve(options.repakedDir) : REPAKED_DIR
+	if (selectionAbs !== unpakedRoot && !isSubPath(unpakedRoot, selectionAbs)) {
+		throw new Error('Access denied: folder outside unpaked directory')
+	}
+
+	let isDir = false
+	try {
+		const st = await fsp.stat(selectionAbs)
+		isDir = st.isDirectory()
+	} catch {
+		isDir = false
+	}
+	if (!isDir) throw new Error(`Folder not found: ${selectionAbs}`)
+
+	const aggregated = await readAggregatedPakEntries(selectionAbs, unpakedRoot)
+	if (!aggregated || aggregated.length === 0) {
+		throw new Error('Aggregate pak database not found for this folder')
+	}
+
+	const index = new Map<string, { entry: AggregatedPakEntry; relFile: string }>()
+	const byLength = [...aggregated].sort(
+		(a, b) => normalizeDbRel(b.relPakPath).length - normalizeDbRel(a.relPakPath).length,
+	)
+	for (const entry of byLength) {
+		const relPak = normalizeDbRel(entry.relPakPath)
+		if (relPak === '' || isUnsafeRelPath(relPak)) continue
+		for (const file of entry.files) {
+			const relFile = normalizeDbRel(file)
+			if (relFile === '' || isUnsafeRelPath(relFile)) continue
+			const key = `${relPak}/${relFile}`
+			if (!index.has(key)) index.set(key, { entry, relFile })
+		}
+	}
+
+	const groups = new Map<string, { entry: AggregatedPakEntry; files: string[] }>()
+	for (const raw of entries) {
+		const hit = index.get(normalizeDbRel(raw))
+		if (!hit) continue
+		const id = normalizeDbRel(hit.entry.relPakPath)
+		let group = groups.get(id)
+		if (!group) {
+			group = { entry: hit.entry, files: [] }
+			groups.set(id, group)
+		}
+		if (!group.files.includes(hit.relFile)) group.files.push(hit.relFile)
+	}
+	if (groups.size === 0) {
+		throw new Error('No selected files match the pak database')
+	}
+
+	await ensureDir(repakedRoot)
+	const ordered = [...groups.values()].sort((a, b) =>
+		normalizeDbRel(a.entry.relPakPath).localeCompare(normalizeDbRel(b.entry.relPakPath)),
+	)
+	const packageTotal = ordered.length
+	const folderName = path.basename(selectionAbs)
+	const rootDir = path.dirname(selectionAbs)
+	const repakedResolved = path.resolve(repakedRoot)
+
+	let repakPool: Piscina<RepakTaskInput, RepakTaskResult> | null = null
+	try {
+		try {
+			repakPool = new Piscina({
+				filename: resolveRepakWorkerFile(),
+				maxThreads: cpuThreadsForWork(),
+				resourceLimits: workerResourceLimits(),
+			})
+		} catch (error) {
+			throw new Error(`RePAK worker pool unavailable: ${errorMessage(error)}`)
+		}
+
+		for (let j = 0; j < ordered.length; j += 1) {
+			abortIfCanceled(signal)
+			const group = ordered[j] as { entry: AggregatedPakEntry; files: string[] }
+			const entry = group.entry
+			const relPakPath = normalizeDbRel(entry.relPakPath)
+			if (isUnsafeRelPath(relPakPath)) {
+				results.failed.push({ folderName, pak: relPakPath, error: `Unsafe path in DB: ${relPakPath}` })
+				continue
+			}
+
+			let srcRoot: string
+			if (typeof entry.destDir === 'string') {
+				const destDir = normalizeDbRel(entry.destDir)
+				if (isUnsafeRelPath(destDir)) {
+					results.failed.push({ folderName, pak: relPakPath, error: `Unsafe destDir in DB: ${entry.destDir}` })
+					continue
+				}
+				srcRoot = destDir === '' ? rootDir : path.join(rootDir, ...destDir.split('/'))
+			} else if (typeof entry.outputFolder === 'string' && entry.outputFolder !== '') {
+				if (!(await existsAsync(entry.outputFolder))) {
+					results.failed.push({ folderName, pak: relPakPath, error: `Source folder missing for '${relPakPath}'` })
+					continue
+				}
+				srcRoot = entry.outputFolder
+			} else {
+				results.failed.push({
+					folderName,
+					pak: relPakPath,
+					error: `No source location (destDir/outputFolder) in DB for '${relPakPath}'`,
+				})
+				continue
+			}
+
+			const pakOutPath = path.resolve(repakedResolved, ...relPakPath.split('/'))
+			if (!isSubPath(repakedResolved, pakOutPath)) {
+				results.failed.push({ folderName, pak: relPakPath, error: `Unsafe output path: ${relPakPath}` })
+				continue
+			}
+			await ensureDir(path.dirname(pakOutPath))
+			const packageName = path.basename(relPakPath)
+			onProgress?.({
+				stage: 'repak-start',
+				packageName,
+				packageIndex: j + 1,
+				packageTotal,
+				percent: 0,
+			})
+
+			const stagingRoot = path.join(
+				repakedResolved,
+				'._tmp_repack',
+				`${Date.now()}-${Math.random().toString(16).slice(2)}`,
+			)
+			try {
+				await ensureDir(stagingRoot)
+				let staged = 0
+				for (let k = 0; k < group.files.length; k += 1) {
+					const relFile = group.files[k] as string
+					abortIfCanceled(signal)
+					if (relFile === '' || isUnsafeRelPath(relFile)) {
+						throw new Error(`Unsafe path in DB: ${relFile}`)
+					}
+					const src = path.join(srcRoot, ...relFile.split('/'))
+					const dest = path.join(stagingRoot, ...relFile.split('/'))
+					if (!isSubPath(stagingRoot, dest)) {
+						throw new Error(`Unsafe path in DB: ${relFile}`)
+					}
+					let srcIsFile = false
+					try {
+						const st = await fsp.stat(src)
+						srcIsFile = st.isFile()
+					} catch {
+						srcIsFile = false
+					}
+					if (srcIsFile) {
+						await ensureDir(path.dirname(dest))
+						await fsp.copyFile(src, dest)
+						staged += 1
+					}
+					if (k % 50 === 49) {
+						await new Promise<void>((resolve) => setImmediate(resolve))
+					}
+				}
+				if (staged === 0) {
+					throw new Error(`No source files found for '${relPakPath}' under '${srcRoot}' (0 of ${group.files.length} staged)`)
+				}
+				await runRepakPoolWithProgress(
+					repakPool,
+					{ inputFolder: stagingRoot, outputPak: pakOutPath, version: 0, concurrency: innerConcurrency(1) },
+					onProgress,
+					signal,
+					{ packageName, packageIndex: j + 1, packageTotal },
+				)
+				await rmAsync(stagingRoot)
+				onProgress?.({
+					stage: 'repak-done',
+					packageName,
+					packageIndex: j + 1,
+					packageTotal,
+					percent: 100,
+					output: pakOutPath,
+				})
+				results.success.push({ folderName, translationName: folderName, pak: relPakPath, outputPak: pakOutPath, fileCount: staged })
+			} catch (error) {
+				await rmAsync(stagingRoot)
+				if (signal?.aborted || errorMessage(error) === 'Operation canceled') throw error
+				results.failed.push({ folderName, pak: relPakPath, error: errorMessage(error) })
+			}
+		}
+
+		onProgress?.({
+			stage: 'unpaked-repak-done',
+			translationName: folderName,
+			packageIndex: 1,
+			packageTotal: 1,
+			percent: 100,
+		})
+	} finally {
+		if (repakPool) await repakPool.destroy()
+	}
+
+	return results
+}

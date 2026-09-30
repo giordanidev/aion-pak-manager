@@ -18,6 +18,7 @@ import type {
 	ProgressOptions,
 	ReadPakDatabaseResult,
 	RepackUnpakedPayload,
+	RepackUnpakedSelectionPayload,
 	ResolveConflictPayload,
 	ResolveConflictResult,
 	ScanPaksResult,
@@ -109,6 +110,15 @@ export function buildElectronApi(): ElectronApi {
 		repackUnpaked: (payload: RepackUnpakedPayload): Promise<OperationResult> =>
 			ipcRenderer.invoke('repack-unpaked', toCloneable({
 				selectedFolderPaths: Array.from(payload.selectedFolderPaths),
+				showFileProgress: payload.showFileProgress,
+				repakedDir: payload.repakedDir,
+				unpakedDir: payload.unpakedDir,
+			})),
+
+		repackUnpakedSelection: (payload: RepackUnpakedSelectionPayload): Promise<OperationResult> =>
+			ipcRenderer.invoke('repack-unpaked-selection', toCloneable({
+				folderPath: payload.folderPath,
+				entries: Array.from(payload.entries),
 				showFileProgress: payload.showFileProgress,
 				repakedDir: payload.repakedDir,
 				unpakedDir: payload.unpakedDir,
