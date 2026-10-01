@@ -2,7 +2,7 @@ import { promises as fsp } from 'fs'
 import path from 'path'
 import { MessageChannel } from 'node:worker_threads'
 import { Piscina } from 'piscina'
-import { decryptFolderParallel, createDecryptPool, resolveUnpakWorkerFile, resolveRepakWorkerFile } from './decrypt-pool'
+import { decryptFolderParallel, createDecryptPool, resolveUnpakWorkerFile, resolveRepakWorkerFile, resolveScanWorkerFile } from './decrypt-pool'
 import type { DecryptFolderOptions } from './decrypt-pool'
 import { errorMessage, type ProgressCallback } from './progress'
 import { extractPaksParallel } from './unpak-parallel'
@@ -15,7 +15,9 @@ import {
 } from './paths'
 import { mapPool, cpuConcurrency } from './parallel'
 import { cpuThreadsForWork, innerConcurrency, workerResourceLimits } from './threads'
-import { isExtractablePak, peekPakKind, scanPakEntries, type PakScanResult } from '../core/unpak'
+import { peekPakKind, type PakFileKind, type PakScanResult } from '../core/unpak'
+import { scanPakOffThread } from './pak-scan-pool'
+import type { ScanFolderTaskInput, ScanFolderTaskResult, ScannedPakFile } from '../workers/scan-folder-task'
 import type { UnpakTaskInput, UnpakTaskResult } from '../workers/unpak-task'
 import type { RepakTaskInput, RepakTaskResult } from '../workers/repak-task'
 import type { ConflictChoice, ExtractConflictRequest } from '../../shared/api-types'
@@ -242,13 +244,43 @@ function isUnsafeRelPath(p: string): boolean {
 	return p.split(/[\\/]/).some((seg) => seg === '..')
 }
 
-async function walkAllFiles(
+function pumpMain(): Promise<void> {
+	// setTimeout (not setImmediate) returns to the native message loop so
+	// Windows does not mark the window "Not Responding" during a long walk.
+	return new Promise((resolve) => setTimeout(resolve, 0))
+}
+
+let scanPool: Piscina<ScanFolderTaskInput, ScanFolderTaskResult> | null = null
+
+function getScanPool(): Piscina<ScanFolderTaskInput, ScanFolderTaskResult> {
+	if (!scanPool) {
+		scanPool = new Piscina({
+			filename: resolveScanWorkerFile(),
+			maxThreads: 1,
+			resourceLimits: {
+				maxOldGenerationSizeMb: 2048,
+				maxYoungGenerationSizeMb: 128,
+			},
+		})
+	}
+	return scanPool
+}
+
+function isExtractableKind(kind: PakFileKind): kind is ScannedPakFile['kind'] {
+	return kind === 'aion' || kind === 'zip' || kind === 'chromium'
+}
+
+/** Main-process fallback when the scan worker cannot start. Yields often enough to keep the window alive. */
+async function scanFolderInProcess(
 	rootDir: string,
-	signal?: AbortSignal,
-	onProgress?: (filesFound: number, entriesScanned: number) => void,
-): Promise<string[]> {
-	const results: string[] = []
-	let entriesScanned = 0
+	includeNonPak: boolean,
+	signal: AbortSignal | undefined,
+	onProgress?: (filesFound: number) => void,
+): Promise<ScanFolderTaskResult> {
+	const pakFiles: ScannedPakFile[] = []
+	const otherFiles: string[] = []
+	let filesFound = 0
+	let scanned = 0
 	async function walk(dir: string): Promise<void> {
 		abortIfCanceled(signal)
 		let names: string[]
@@ -265,22 +297,97 @@ async function walkAllFiles(
 			} catch {
 				continue
 			}
-			entriesScanned += 1
+			scanned += 1
 			if (stat.isDirectory()) {
 				await walk(fullPath)
 			} else if (stat.isFile()) {
-				results.push(fullPath)
+				filesFound += 1
+				const ext = path.extname(name).toLowerCase()
+				if (ext === '.pak') {
+					const kind = peekPakKind(fullPath)
+					if (isExtractableKind(kind)) pakFiles.push({ path: fullPath, kind })
+					else if (includeNonPak) otherFiles.push(fullPath)
+				} else if (includeNonPak) {
+					otherFiles.push(fullPath)
+				}
 			}
-			if (entriesScanned % 100 === 0) {
-				// yield to event loop to keep UI responsive
-				await new Promise<void>((resolve) => setImmediate(resolve))
+			if ((scanned & 31) === 0) {
+				await pumpMain()
 				abortIfCanceled(signal)
-				onProgress?.(results.length, entriesScanned)
+				onProgress?.(filesFound)
 			}
 		}
 	}
 	await walk(rootDir)
-	return results
+	onProgress?.(filesFound)
+	return { pakFiles, otherFiles, filesFound }
+}
+
+/**
+ * Walk + classify off the Electron main thread. Progress counts come back on a
+ * MessagePort so the window keeps painting while the disk is scanned.
+ */
+async function scanFolderOffThread(
+	rootDir: string,
+	includeNonPak: boolean,
+	signal: AbortSignal | undefined,
+	onProgress?: (filesFound: number) => void,
+): Promise<ScanFolderTaskResult> {
+	const channel = new MessageChannel()
+	const { port1, port2 } = channel
+	const abortListener = (): void => {
+		try {
+			port1.postMessage({ type: 'abort' })
+		} catch {
+			// ignore
+		}
+	}
+	const messageHandler = (msg: unknown): void => {
+		if (!msg || typeof msg !== 'object') return
+		const filesFound = (msg as { filesFound?: unknown }).filesFound
+		if ((msg as { type?: unknown }).type === 'progress' && typeof filesFound === 'number') {
+			onProgress?.(filesFound)
+		}
+	}
+	try {
+		port1.on('message', messageHandler)
+	} catch {
+		// ignore
+	}
+	if (signal) {
+		if (signal.aborted) abortListener()
+		else signal.addEventListener('abort', abortListener, { once: true })
+	}
+	try {
+		return await getScanPool().run(
+			{ rootDir, includeNonPak, port: port2 },
+			{ transferList: [port2], signal: signal ?? undefined } as unknown as Parameters<Piscina['run']>[1],
+		)
+	} catch (error) {
+		if (signal?.aborted || /canceled/i.test(errorMessage(error))) throw error
+		const message = errorMessage(error)
+		const workerUnavailable = /worker file not found|cannot find module|MODULE_NOT_FOUND/i.test(message)
+		if (!workerUnavailable) throw error
+		return scanFolderInProcess(rootDir, includeNonPak, signal, onProgress)
+	} finally {
+		if (signal) {
+			try {
+				signal.removeEventListener('abort', abortListener)
+			} catch {
+				// ignore
+			}
+		}
+		try {
+			port1.off('message', messageHandler)
+		} catch {
+			// ignore
+		}
+		try {
+			port1.close()
+		} catch {
+			// ignore
+		}
+	}
 }
 
 /**
@@ -328,7 +435,7 @@ async function removeLegacySiblingDbs(
 				// ignore individual delete failures
 			}
 			if (removed > 0 && removed % 100 === 0) {
-				await new Promise<void>((resolve) => setImmediate(resolve))
+				await pumpMain()
 				onRemoved?.(removed)
 			}
 		}
@@ -369,7 +476,7 @@ async function collectPakDirs(selectionAbs: string, signal?: AbortSignal): Promi
 			}
 			await walk(fullPath)
 			if (found.length % 50 === 0) {
-				await new Promise<void>((resolve) => setImmediate(resolve))
+				await pumpMain()
 				abortIfCanceled(signal)
 			}
 		}
@@ -475,46 +582,30 @@ export async function extractFolder(
 	// Emitted before the walk so the UI leaves its idle state immediately.
 	onProgress?.({ stage: 'extract-folder-start', percent: 0 })
 
-	// The walk can take a while on large clients; emit a throttled "Scanning"
-	// heartbeat so the bar never looks frozen at 0% before denom is known.
-	const allFiles = await walkAllFiles(inputResolved, options.signal, (filesFound) => {
-		onProgress?.({
-			stage: 'extract-folder',
-			current: 0,
-			total: 0,
-			percent: 0,
-			message: `Scanning... (${filesFound} files)`,
-		})
-	})
-	// Only AION/ZIP PAKs are UnPAKed. Other `.pak` files (CEF/Chromium, etc.)
-	// share the extension but must be mirrored as ordinary files.
-	const pakFiles: string[] = []
-	const otherFiles: string[] = []
-	let classified = 0
-	for (const filePath of allFiles) {
-		abortIfCanceled(options.signal)
-		const ext = path.extname(filePath).toLowerCase()
-		if (ext === '.pak') {
-			if (isExtractablePak(filePath)) {
-				pakFiles.push(filePath)
-			} else if (payload.includeNonPak) {
-				otherFiles.push(filePath)
-			}
-		} else if (payload.includeNonPak) {
-			otherFiles.push(filePath)
-		}
-		classified += 1
-		if (classified % 64 === 0) {
-			await new Promise<void>((r) => setImmediate(r))
+	// Walk + header peek run in a worker. The main process only receives a
+	// throttled file count, so the window keeps handling input and paint.
+	const scanned = await scanFolderOffThread(
+		inputResolved,
+		payload.includeNonPak,
+		options.signal,
+		(filesFound) => {
 			onProgress?.({
-				stage: 'extract-folder',
-				current: 0,
+				stage: 'extract-folder-scan',
+				current: filesFound,
 				total: 0,
 				percent: 0,
-				message: `Classifying... (${classified}/${allFiles.length})`,
+				message: `Scanning... (${filesFound} files)`,
 			})
-		}
-	}
+		},
+	)
+	const pakFiles = scanned.pakFiles
+	const otherFiles = scanned.otherFiles
+	onProgress?.({
+		stage: 'extract-folder-scan',
+		current: scanned.filesFound,
+		total: scanned.filesFound,
+		percent: 0,
+	})
 
 	const rootDbPath = unpakedRootDbForFolder(inputResolved, unpakedRoot)
 	const legacyRootDbPath = unpakedLegacyRootDbForFolder(inputResolved, unpakedRoot)
@@ -592,14 +683,15 @@ export async function extractFolder(
 
 	type PakJob = { pakPath: string; relPakPath: string; destDir: string; destDirAbs: string; legacyWrapper: string }
 	const candidates: PakJob[] = []
-	for (const pakPath of pakFiles) {
+	for (const pak of pakFiles) {
 		abortIfCanceled(options.signal)
+		const pakPath = pak.path
 		const relPakPath = relToUnpaked(pakPath)
 		const parentDir = posixDirname(relPakPath)
 		// Nest under `<stem>/` when requested, or always for Chromium/CEF (bare
 		// numeric IDs would otherwise collide across sibling packs).
 		const stem = path.basename(pakPath, path.extname(pakPath))
-		const nestStem = payload.createPakFolder === true || peekPakKind(pakPath) === 'chromium'
+		const nestStem = payload.createPakFolder === true || pak.kind === 'chromium'
 		const destDir = nestStem
 			? (parentDir === '' ? stem : `${parentDir}/${stem}`)
 			: parentDir
@@ -608,7 +700,7 @@ export async function extractFolder(
 		const legacyRel = toPosix(path.relative(relRoot, pakPath))
 		const legacyWrapper = path.join(unpakedRoot, ...legacyRel.split('/'))
 		candidates.push({ pakPath, relPakPath, destDir, destDirAbs, legacyWrapper })
-		if (candidates.length % 20 === 0) await new Promise<void>((r) => setImmediate(r))
+		if (candidates.length % 20 === 0) await pumpMain()
 	}
 
 	// Conflict pass: a candidate conflicts when its mirrored pak path is already
@@ -638,7 +730,7 @@ export async function extractFolder(
 		try {
 			if (isConflict && conflictMode === 'ask') {
 				conflictSeen += 1
-				const scan = await scanPakEntries(candidate.pakPath, () => options.signal?.aborted ?? false)
+				const scan = await scanPakOffThread(candidate.pakPath, options.signal)
 				pakScans.set(candidate.pakPath, scan)
 				files = scan.files
 				const choice = options.onConflict
@@ -661,7 +753,7 @@ export async function extractFolder(
 				accept = conflictMode === 'overwrite-all'
 			}
 			if (!files) {
-				const scan = await scanPakEntries(candidate.pakPath, () => options.signal?.aborted ?? false)
+				const scan = await scanPakOffThread(candidate.pakPath, options.signal)
 				pakScans.set(candidate.pakPath, scan)
 				files = scan.files
 			}
@@ -1007,60 +1099,34 @@ async function repackSimpleFolder(
 		percent: 0,
 	})
 
-	// Staging outside source tree, under the repaked root, so source walk never sees it
-	const stagingRoot = path.join(
-		path.resolve(repakedRoot),
-		'._tmp_repack',
-		`${Date.now()}-${Math.random().toString(16).slice(2)}`,
-	)
-	await ensureDir(stagingRoot)
-
 	try {
-		const filesToCopy: string[] = []
-		const emptyDirs: string[] = []
+		if (!repakPool) throw new Error('RePAK worker pool unavailable')
+		await runRepakPoolWithProgress(
+			repakPool,
+			{
+				inputFolder: selectionAbs,
+				outputPak: pakOutPath,
+				version: 0,
+				concurrency: innerConcurrency(totalSelections),
+				rejectEmpty: true,
+			},
+			onProgress,
+			signal,
+			{ packageName, packageIndex: 1, packageTotal: 1 },
+		)
 
-		async function walkSimple(cur: string, rel: string): Promise<void> {
-			abortIfCanceled(signal)
-			let names: string[]
-			try {
-				names = await fsp.readdir(cur)
-			} catch {
-				return
-			}
-			for (const name of names) {
-				if (name === '._tmp_repack') continue
-				const fullPath = path.join(cur, name)
-				let stat
-				try {
-					stat = await fsp.stat(fullPath)
-				} catch {
-					continue
-				}
-				if (stat.isDirectory()) {
-					const nextRel = rel ? `${rel}/${name}` : name
-					await walkSimple(fullPath, nextRel)
-					const destDir = path.join(stagingRoot, nextRel)
-					if (!(await existsAsync(destDir))) {
-						emptyDirs.push(nextRel)
-					}
-				} else if (stat.isFile()) {
-					if (name === '.pak-metadata.json') continue
-					const lower = name.toLowerCase()
-					if (lower.endsWith('.db') || lower.endsWith('.pak')) continue
-					filesToCopy.push(fullPath)
-				}
-				if (filesToCopy.length % 50 === 0 || emptyDirs.length % 50 === 0) {
-					await new Promise<void>((resolve) => setImmediate(resolve))
-					abortIfCanceled(signal)
-				}
-			}
-		}
-
-		await walkSimple(selectionAbs, '')
-		abortIfCanceled(signal)
-
-		if (filesToCopy.length === 0) {
-			await rmAsync(stagingRoot)
+		onProgress?.({
+			stage: 'repak-done',
+			packageName,
+			packageIndex: 1,
+			packageTotal: 1,
+			percent: 100,
+			output: pakOutPath,
+		})
+		return { ok: true, entry: { folderName, translationName: folderName, pak: packageName, outputPak: pakOutPath }, doneStage: false }
+	} catch (error) {
+		const message = errorMessage(error)
+		if (/No files to repack/i.test(message)) {
 			onProgress?.({
 				stage: 'unpaked-repak-done',
 				translationName: folderName,
@@ -1078,55 +1144,7 @@ async function repackSimpleFolder(
 				doneStage: true,
 			}
 		}
-
-		// Ensure empty directory structure in staging
-		for (const dirRel of emptyDirs) {
-			await ensureDir(path.join(stagingRoot, ...dirRel.split('/')))
-			if (emptyDirs.indexOf(dirRel) % 20 === 0) await new Promise<void>((r) => setImmediate(r))
-		}
-
-		await mapPool(
-			filesToCopy,
-			Math.min(cpuConcurrency(), Math.max(filesToCopy.length, 1)),
-			async (src) => {
-				abortIfCanceled(signal)
-				const rel = path.relative(selectionAbs, src)
-				const dest = path.join(stagingRoot, rel)
-				if (!isSubPath(stagingRoot, dest) && path.resolve(dest) !== path.resolve(stagingRoot)) {
-					throw new Error(`Unsafe path: ${rel}`)
-				}
-				await ensureDir(path.dirname(dest))
-				await fsp.copyFile(src, dest)
-			},
-			signal,
-		)
-
-		abortIfCanceled(signal)
-
-		// 100% assíncrono: exclusivamente em workers Piscina; sem fallback síncrono no main.
-		if (!repakPool) throw new Error('RePAK worker pool unavailable')
-		await runRepakPoolWithProgress(
-			repakPool,
-			{ inputFolder: stagingRoot, outputPak: pakOutPath, version: 0, concurrency: innerConcurrency(totalSelections) },
-			onProgress,
-			signal,
-			{ packageName, packageIndex: 1, packageTotal: 1 },
-		)
-
-		await rmAsync(stagingRoot)
-
-		onProgress?.({
-			stage: 'repak-done',
-			packageName,
-			packageIndex: 1,
-			packageTotal: 1,
-			percent: 100,
-			output: pakOutPath,
-		})
-		return { ok: true, entry: { folderName, translationName: folderName, pak: packageName, outputPak: pakOutPath }, doneStage: false }
-	} catch (error) {
-		await rmAsync(stagingRoot)
-		return { ok: false, failure: { folderName, translationName: folderName, error: errorMessage(error) }, doneStage: false }
+		return { ok: false, failure: { folderName, translationName: folderName, error: message }, doneStage: false }
 	}
 }
 
@@ -1298,56 +1316,28 @@ export async function repackTranslations(
 						})
 
 						try {
-							// Stage outside the extract tree so cleanup never touches /PAKS/unpaked content.
-							const stagingRoot = path.join(
-								path.resolve(repakedRoot),
-								'._tmp_repack',
-								`${Date.now()}-${Math.random().toString(16).slice(2)}`,
-							)
-							await ensureDir(stagingRoot)
-							let staged = 0
-							for (let k = 0; k < entry.files.length; k += 1) {
-								const relFile = entry.files[k] as string
-								abortIfCanceled(options.signal)
-								if (relFile === '') continue
-								if (isUnsafeRelPath(relFile)) {
-									throw new Error(`Unsafe path in DB: ${relFile}`)
-								}
-								const src = path.join(srcRoot, ...relFile.split('/'))
-								const dest = path.join(stagingRoot, ...relFile.split('/'))
-								if (!isSubPath(stagingRoot, dest)) {
-									throw new Error(`Unsafe path in DB: ${relFile}`)
-								}
-								let srcIsFile = false
-								try {
-									const st = await fsp.stat(src)
-									srcIsFile = st.isFile()
-								} catch {
-									srcIsFile = false
-								}
-								if (srcIsFile) {
-									await ensureDir(path.dirname(dest))
-									await fsp.copyFile(src, dest)
-									staged += 1
-								}
-								if (k % 50 === 49) {
-									await new Promise<void>((resolve) => setImmediate(resolve))
-								}
-							}
-							if (staged === 0) {
-								throw new Error(`No source files found for '${relPakPath}' under '${srcRoot}' (0 of ${entry.files.length} staged)`)
-							}
-
-							// 100% assíncrono: exclusivamente em workers Piscina; sem fallback no main.
+							// Pack straight from the extract tree. The worker reads the DB
+							// file list; nothing is copied on the main process.
 							if (!repakPool) throw new Error('RePAK worker pool unavailable')
+							for (const relFile of entry.files) {
+								if (relFile !== '' && isUnsafeRelPath(relFile)) {
+									throw new Error(`Unsafe path in DB: ${relFile}`)
+								}
+							}
 							await runRepakPoolWithProgress(
 								repakPool!,
-								{ inputFolder: stagingRoot, outputPak: pakOutPath, version: 0, concurrency: innerConcurrency(totalSelections) },
+								{
+									op: 'pack-list',
+									srcRoot,
+									files: entry.files,
+									outputPak: pakOutPath,
+									version: 0,
+									concurrency: innerConcurrency(totalSelections),
+								},
 								wrapRepakProgress(),
 								options.signal,
 								{ packageName, packageIndex: j + 1, packageTotal },
 							)
-							await rmAsync(stagingRoot)
 							paksCompleted += 1
 							onProgress?.({
 								stage: 'repak-done',
@@ -1407,56 +1397,28 @@ export async function repackTranslations(
 						})
 
 						try {
-							// Stage outside the extract tree so cleanup never touches /PAKS/unpaked content.
-							const stagingRoot = path.join(
-								path.resolve(repakedRoot),
-								'._tmp_repack',
-								`${Date.now()}-${Math.random().toString(16).slice(2)}`,
-							)
-							await ensureDir(stagingRoot)
-							let staged = 0
-							for (let k = 0; k < metaFiles.length; k += 1) {
-								const relFile = metaFiles[k] as string
-								abortIfCanceled(options.signal)
-								if (relFile === '') continue
-								if (isUnsafeRelPath(relFile)) {
+							for (const relFile of metaFiles) {
+								if (relFile !== '' && isUnsafeRelPath(relFile)) {
 									throw new Error(`Unsafe path in DB: ${relFile}`)
 								}
-								const src = path.join(pakDir, ...relFile.split('/'))
-								const dest = path.join(stagingRoot, ...relFile.split('/'))
-								if (!isSubPath(stagingRoot, dest)) {
-									throw new Error(`Unsafe path in DB: ${relFile}`)
-								}
-								let srcIsFile = false
-								try {
-									const st = await fsp.stat(src)
-									srcIsFile = st.isFile()
-								} catch {
-									srcIsFile = false
-								}
-								if (srcIsFile) {
-									await ensureDir(path.dirname(dest))
-									await fsp.copyFile(src, dest)
-									staged += 1
-								}
-								if (k % 50 === 49) {
-									await new Promise<void>((resolve) => setImmediate(resolve))
-								}
-							}
-							if (staged === 0) {
-								throw new Error(`No source files found for '${relPakPath}' under '${pakDir}' (0 of ${metaFiles.length} staged)`)
 							}
 
 							// 100% assíncrono: exclusivamente em workers Piscina; sem fallback no main.
 							if (!repakPool) throw new Error('RePAK worker pool unavailable')
 							await runRepakPoolWithProgress(
 								repakPool!,
-								{ inputFolder: stagingRoot, outputPak: pakOutPath, version: 0, concurrency: innerConcurrency(totalSelections) },
+								{
+									op: 'pack-list',
+									srcRoot: pakDir,
+									files: metaFiles,
+									outputPak: pakOutPath,
+									version: 0,
+									concurrency: innerConcurrency(totalSelections),
+								},
 								wrapRepakProgress(),
 								options.signal,
 								{ packageName, packageIndex: j + 1, packageTotal: pakDirs.length },
 							)
-							await rmAsync(stagingRoot)
 							paksCompleted += 1
 							onProgress?.({
 								stage: 'repak-done',
@@ -1640,52 +1602,24 @@ export async function repackUnpakedSelection(
 				percent: 0,
 			})
 
-			const stagingRoot = path.join(
-				repakedResolved,
-				'._tmp_repack',
-				`${Date.now()}-${Math.random().toString(16).slice(2)}`,
-			)
 			try {
-				await ensureDir(stagingRoot)
-				let staged = 0
-				for (let k = 0; k < group.files.length; k += 1) {
-					const relFile = group.files[k] as string
-					abortIfCanceled(signal)
-					if (relFile === '' || isUnsafeRelPath(relFile)) {
-						throw new Error(`Unsafe path in DB: ${relFile}`)
-					}
-					const src = path.join(srcRoot, ...relFile.split('/'))
-					const dest = path.join(stagingRoot, ...relFile.split('/'))
-					if (!isSubPath(stagingRoot, dest)) {
-						throw new Error(`Unsafe path in DB: ${relFile}`)
-					}
-					let srcIsFile = false
-					try {
-						const st = await fsp.stat(src)
-						srcIsFile = st.isFile()
-					} catch {
-						srcIsFile = false
-					}
-					if (srcIsFile) {
-						await ensureDir(path.dirname(dest))
-						await fsp.copyFile(src, dest)
-						staged += 1
-					}
-					if (k % 50 === 49) {
-						await new Promise<void>((resolve) => setImmediate(resolve))
-					}
-				}
-				if (staged === 0) {
-					throw new Error(`No source files found for '${relPakPath}' under '${srcRoot}' (0 of ${group.files.length} staged)`)
+				for (const relFile of group.files) {
+					if (relFile !== '' && isUnsafeRelPath(relFile)) throw new Error(`Unsafe path in DB: ${relFile}`)
 				}
 				await runRepakPoolWithProgress(
 					repakPool,
-					{ inputFolder: stagingRoot, outputPak: pakOutPath, version: 0, concurrency: innerConcurrency(1) },
+					{
+						op: 'pack-list',
+						srcRoot,
+						files: group.files,
+						outputPak: pakOutPath,
+						version: 0,
+						concurrency: innerConcurrency(1),
+					},
 					onProgress,
 					signal,
 					{ packageName, packageIndex: j + 1, packageTotal },
 				)
-				await rmAsync(stagingRoot)
 				onProgress?.({
 					stage: 'repak-done',
 					packageName,
@@ -1694,9 +1628,8 @@ export async function repackUnpakedSelection(
 					percent: 100,
 					output: pakOutPath,
 				})
-				results.success.push({ folderName, translationName: folderName, pak: relPakPath, outputPak: pakOutPath, fileCount: staged })
+				results.success.push({ folderName, translationName: folderName, pak: relPakPath, outputPak: pakOutPath, fileCount: group.files.length })
 			} catch (error) {
-				await rmAsync(stagingRoot)
 				if (signal?.aborted || errorMessage(error) === 'Operation canceled') throw error
 				results.failed.push({ folderName, pak: relPakPath, error: errorMessage(error) })
 			}

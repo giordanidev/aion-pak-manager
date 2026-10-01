@@ -6,7 +6,7 @@ import { useAppState, formatBytes } from '../composables/useAppState'
 
 const { t } = useI18n()
 const electron = useElectron()
-const { state, log, setSummary } = useAppState()
+const { state, logI18n, setSummary } = useAppState()
 
 const stopping = ref(false)
 
@@ -58,15 +58,15 @@ async function cancelCurrentAction(): Promise<void> {
   }
   stopping.value = true
   setSummary(t('progress.canceling'), 'info')
-  log(t('progress.stopRequested'), 'info')
+  logI18n('progress.stopRequested', undefined, 'info')
   try {
     const result = await electron.cancelAction()
     if (!result.success) {
-      log(t('progress.cancelFailed', { error: result.error }), 'error')
+      logI18n('progress.cancelFailed', { error: result.error ?? '' }, 'error')
       setSummary(result.error || t('progress.cancelFailSummary'), 'error')
     }
   } catch (err) {
-    log(t('progress.cancelError', { error: err instanceof Error ? err.message : String(err) }), 'error')
+    logI18n('progress.cancelError', { error: err instanceof Error ? err.message : String(err) }, 'error')
     setSummary(t('progress.cancelFailSummary'), 'error')
   } finally {
     stopping.value = false
@@ -85,7 +85,7 @@ async function cancelCurrentAction(): Promise<void> {
             v-if="state.actionRunning || state.listsRefreshing"
             class="inline-block h-3.5 w-3.5 flex-none animate-spin rounded-full border-2 border-border border-t-accent"
           ></span>
-          <span class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[13px] font-bold text-bright [text-shadow:0_1px_2px_rgba(0,0,0,0.6)]">{{ state.progressText }}</span>
+          <span class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[13px] font-bold text-bright [text-shadow:0_1px_2px_rgba(0,0,0,0.6)]">{{ t(state.progressI18nKey, state.progressI18nParams) }}</span>
         </div>
         <span class="flex-none whitespace-nowrap text-[13px] font-bold tabular-nums text-bright [text-shadow:0_1px_2px_rgba(0,0,0,0.6)]">{{ percentText }}</span>
       </div>

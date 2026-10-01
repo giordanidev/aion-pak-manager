@@ -4,13 +4,14 @@ import { useI18n } from 'vue-i18n'
 import type { OperationFailure } from '../../shared/api-types'
 import { getShowFileNames, useElectron } from '../composables/useElectron'
 import { useAppState, basename } from '../composables/useAppState'
+import { useVirtualWindow, VIRTUAL_ROW_HEIGHT } from '../composables/useVirtualWindow'
 
 const props = withDefaults(
   defineProps<{
     open: boolean
     pakPath: string | null
     source?: 'pak' | 'repaked' | 'unpaked'
-    /** Folder (RePAKEDS/UnPAKEDS): read-only structure view (no drop/delete/extract). */
+    /** Folder (RePAKEDS/UnPAKEDS): browse the folder. RePAK folders can drop onto a .pak and open it. */
     structureOnly?: boolean
   }>(),
   {
@@ -22,7 +23,7 @@ const emit = defineEmits<{ (e: 'close'): void; (e: 'done'): void; (e: 'changed')
 
 const { t } = useI18n()
 const electron = useElectron()
-const { state, log, clearLog, setProgress, setSummary, setActionRunning } = useAppState()
+const { state, logI18n, clearLog, setProgress, setSummary, setActionRunning } = useAppState()
 
 const loading = ref(false)
 const treeBuilding = ref(false)
@@ -30,20 +31,29 @@ const error = ref('')
 const files = ref<string[]>([])
 const selected = ref<string[]>([])
 const decrypt = ref(false)
+const searchInput = ref('')
 const searchQuery = ref('')
+const searchBusy = ref(false)
+let searchTimer: ReturnType<typeof setTimeout> | undefined
 const requestId = ref(0)
 const dropActive = ref(false)
 const dropTargetFolder = ref('')
+const dropPakPath = ref<string | null>(null)
 const expandingKey = ref<string | null>(null)
 const repakedSelected = ref<{ key: string; name: string; isDir: boolean } | null>(null)
 const confirmTarget = ref<{ key: string; name: string; isDir: boolean } | null>(null)
 const deleteRootConfirmOpen = ref(false)
 const deletingRoot = ref(false)
-const pendingDrop = ref<{ paths: string[]; targetFolder: string; conflicts: string[] } | null>(null)
+const pendingDrop = ref<{ paths: string[]; targetFolder: string; conflicts: string[]; pakPath: string } | null>(null)
+const drilledPakPath = ref<string | null>(null)
 
 const isRepaked = computed(() => props.source === 'repaked')
 const isUnpaked = computed(() => props.source === 'unpaked')
-const fullTree = computed(() => isRepaked.value || props.structureOnly)
+const activePath = computed(() => drilledPakPath.value ?? props.pakPath)
+/** Folder listing (not the inside of a drilled-in .pak). */
+const listingFolder = computed(() => props.structureOnly && !drilledPakPath.value)
+const fullTree = computed(() => listingFolder.value)
+const repakEditable = computed(() => isRepaked.value && !listingFolder.value)
 const contentBase = computed(() => {
   if (isRepaked.value) return state.customDirs.repaked || undefined
   if (isUnpaked.value) return state.customDirs.unpaked || undefined
@@ -96,23 +106,22 @@ function sortChildren(node: TreeNode): TreeNode[] {
   })
 }
 
-const pakName = computed(() => (props.pakPath ? basename(props.pakPath) : ''))
-const isRootFolder = computed(() => props.structureOnly || !isPakName(pakName.value))
+const pakName = computed(() => (activePath.value ? basename(activePath.value) : ''))
+const isRootFolder = computed(() => listingFolder.value || !isPakName(pakName.value))
 const isSelected = (file: string): boolean => selected.value.includes(file)
 const searchActive = computed(() => searchQuery.value.trim().length > 0)
+const searchPending = computed(() => searchInput.value.trim() !== searchQuery.value.trim())
 
-const leftRows = computed<LeftRow[]>(() => {
+function collectMatches(node: TreeNode, query: string, out: TreeNode[]): void {
+  for (const child of node.children.values()) {
+    if (child.name.toLowerCase().includes(query)) out.push(child)
+    else collectMatches(child, query, out)
+  }
+}
+
+function buildLeftRows(query: string): LeftRow[] {
   const rows: LeftRow[] = []
-  const query = searchQuery.value.trim().toLowerCase()
   if (query) {
-    function collectMatches(node: TreeNode): TreeNode[] {
-      const matches: TreeNode[] = []
-      for (const child of node.children.values()) {
-        if (child.name.toLowerCase().includes(query)) matches.push(child)
-        else matches.push(...collectMatches(child))
-      }
-      return matches
-    }
     function emit(node: TreeNode, depth: number): void {
       const isDir = node.children.size > 0
       const isExpanded = expanded.value.has(node.key)
@@ -121,7 +130,8 @@ const leftRows = computed<LeftRow[]>(() => {
         for (const child of sortChildren(node)) emit(child, depth + 1)
       }
     }
-    const matches = collectMatches(treeRoot.value)
+    const matches: TreeNode[] = []
+    collectMatches(treeRoot.value, query, matches)
     matches.sort((a, b) => {
       const aDir = a.children.size > 0
       const bDir = b.children.size > 0
@@ -141,6 +151,49 @@ const leftRows = computed<LeftRow[]>(() => {
   }
   walk(treeRoot.value, 0)
   return rows
+}
+
+const leftRows = ref<LeftRow[]>([])
+let rowsGen = 0
+watch([searchQuery, treeRoot, expanded], async () => {
+  const id = ++rowsGen
+  const query = searchQuery.value.trim().toLowerCase()
+  if (query) {
+    searchBusy.value = true
+    await new Promise<void>((resolve) => setTimeout(resolve, 0))
+    if (id !== rowsGen) return
+  }
+  leftRows.value = buildLeftRows(query)
+  if (id === rowsGen) searchBusy.value = false
+})
+
+watch(searchInput, (value) => {
+  if (searchTimer) clearTimeout(searchTimer)
+  if (!value.trim()) {
+    searchQuery.value = ''
+    return
+  }
+  searchTimer = setTimeout(() => {
+    searchQuery.value = value
+  }, 400)
+})
+
+const leftCount = computed(() => leftRows.value.length)
+const {
+  start: leftStart,
+  end: leftEnd,
+  totalHeight: leftTotalHeight,
+  onScroll: onLeftScroll,
+  bind: bindLeftScroll,
+} = useVirtualWindow(leftCount)
+const visibleLeftRows = computed(() => {
+  const rows = leftRows.value
+  const items: { row: LeftRow; index: number }[] = []
+  for (let i = leftStart.value; i < leftEnd.value; i += 1) {
+    const row = rows[i]
+    if (row) items.push({ row, index: i })
+  }
+  return items
 })
 
 const selectedTree = computed<TreeNode>(() => {
@@ -178,6 +231,24 @@ const selectedRows = computed<RightRow[]>(() => {
   }
   visit(selectedTree.value, 0)
   return rows
+})
+
+const selectedCount = computed(() => selectedRows.value.length)
+const {
+  start: selectedStart,
+  end: selectedEnd,
+  totalHeight: selectedTotalHeight,
+  onScroll: onSelectedScroll,
+  bind: bindSelectedScroll,
+} = useVirtualWindow(selectedCount)
+const visibleSelectedRows = computed(() => {
+  const rows = selectedRows.value
+  const items: { row: RightRow; index: number }[] = []
+  for (let i = selectedStart.value; i < selectedEnd.value; i += 1) {
+    const row = rows[i]
+    if (row) items.push({ row, index: i })
+  }
+  return items
 })
 
 function collectFiles(node: TreeNode, out: string[] = []): string[] {
@@ -236,22 +307,53 @@ function toggleSelectedNode(key: string): void {
   selectedExpanded.value = next
 }
 
+function joinUnder(base: string, relPosix: string): string {
+  const sep = base.includes('\\') ? '\\' : '/'
+  const rel = relPosix.split('/').join(sep)
+  return `${base.replace(/[\\/]+$/, '')}${sep}${rel}`
+}
+
+function parentDir(full: string): string {
+  const normalized = full.replace(/\\/g, '/')
+  const index = normalized.lastIndexOf('/')
+  return index > 0 ? full.slice(0, index) : full
+}
+
+function pakFilePath(row: LeftRow): string | null {
+  if (!listingFolder.value || !isRepaked.value || row.isDir || !isPakName(row.name) || !props.pakPath) return null
+  return joinUnder(props.pakPath, row.key)
+}
+
+function rowDropHighlight(row: LeftRow): boolean {
+  if (!dropActive.value) return false
+  const pakFile = pakFilePath(row)
+  if (pakFile) return dropPakPath.value === pakFile
+  return repakEditable.value && row.isDir && dropTargetFolder.value === row.key
+}
+
 function onRowClick(row: LeftRow): void {
   if (state.actionRunning) return
-  if (props.structureOnly) {
+  if (listingFolder.value) {
+    if (isRepaked.value && !row.isDir && isPakName(row.name) && props.pakPath) {
+      drilledPakPath.value = joinUnder(props.pakPath, row.key)
+      selected.value = []
+      repakedSelected.value = null
+      searchInput.value = ''
+      searchQuery.value = ''
+      void loadContents()
+      return
+    }
     if (row.isDir) toggleNode(row.key)
     return
   }
-  if (isRepaked.value) {
+  if (repakEditable.value) {
     repakedSelected.value = { key: row.key, name: row.name, isDir: row.isDir }
     if (row.isDir) toggleNode(row.key)
+    else addFile(row.key)
     return
   }
-  if (row.isDir) {
-    toggleNode(row.key)
-  } else {
-    addFile(row.key)
-  }
+  if (row.isDir) toggleNode(row.key)
+  else addFile(row.key)
 }
 
 function parentFolder(key: string): string {
@@ -260,16 +362,28 @@ function parentFolder(key: string): string {
 }
 
 function onRowDragOver(row: LeftRow, event: DragEvent): void {
-  if (!isRepaked.value || props.structureOnly || state.actionRunning) return
+  if (state.actionRunning) return
+  const pakFile = pakFilePath(row)
+  if (pakFile) {
+    event.preventDefault()
+    event.stopPropagation()
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
+    dropActive.value = true
+    dropPakPath.value = pakFile
+    dropTargetFolder.value = ''
+    return
+  }
+  if (!repakEditable.value) return
   event.preventDefault()
   event.stopPropagation()
   if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
   dropActive.value = true
+  dropPakPath.value = activePath.value
   dropTargetFolder.value = row.isDir ? row.key : parentFolder(row.key)
 }
 
 function requestDelete(): void {
-  if (!isRepaked.value || props.structureOnly || state.actionRunning) return
+  if (!repakEditable.value || state.actionRunning) return
   const current = repakedSelected.value
   if (!current) return
   confirmTarget.value = { key: current.key, name: current.name, isDir: current.isDir }
@@ -277,18 +391,18 @@ function requestDelete(): void {
 
 async function confirmDelete(): Promise<void> {
   const target = confirmTarget.value
-  const pakPath = props.pakPath
+  const pakPath = activePath.value
   if (!target || !pakPath || state.actionRunning) return
   confirmTarget.value = null
   const entries = target.isDir ? [`${target.key}/`] : [target.key]
   setActionRunning(true)
   clearLog()
   setSummary(t('pak.deletingEntries', { name: target.name }), 'info')
-  log(t('pak.deletingEntriesLog', { name: target.name }))
+  logI18n('pak.deletingEntriesLog', { name: target.name })
   try {
     const result = await electron.deletePakEntries({ pakPath, entries, base: contentBase.value, showFileProgress: getShowFileNames() })
     if (result.success) {
-      log(t('pak.deleteDone', { name: target.name }), 'success')
+      logI18n('pak.deleteDone', { name: target.name }, 'success')
       setSummary(t('pak.deleteDone', { name: target.name }), 'success')
       repakedSelected.value = null
       await loadContents()
@@ -296,15 +410,15 @@ async function confirmDelete(): Promise<void> {
     } else {
       const failed = (result.results?.failed?.[0] ?? null) as OperationFailure | null
       const message = failed?.error || result.error || ''
-      log(t('pak.deleteFailed', { error: message }), 'error')
+      logI18n('pak.deleteFailed', { error: message }, 'error')
       setSummary(t('pak.deleteFailed', { error: message }), 'error')
     }
   } catch (err) {
-    log(t('pak.deleteFailed', { error: err instanceof Error ? err.message : String(err) }), 'error')
+    logI18n('pak.deleteFailed', { error: err instanceof Error ? err.message : String(err) }, 'error')
     setSummary(t('pak.deleteFailed', { error: err instanceof Error ? err.message : String(err) }), 'error')
   } finally {
     setActionRunning(false)
-    setProgress(0, t('progress.idle'))
+    setProgress(0, 'progress.idle')
   }
 }
 
@@ -313,41 +427,41 @@ function cancelDelete(): void {
 }
 
 function requestDeleteRoot(): void {
-  if (!props.pakPath || state.actionRunning || deletingRoot.value || deleteRootConfirmOpen.value || confirmTarget.value) return
+  if (!activePath.value || state.actionRunning || deletingRoot.value || deleteRootConfirmOpen.value || confirmTarget.value) return
   deleteRootConfirmOpen.value = true
 }
 
 async function confirmDeleteRoot(): Promise<void> {
-  const targetPath = props.pakPath
+  const targetPath = activePath.value
   if (!targetPath || state.actionRunning || deletingRoot.value) return
   const name = basename(targetPath)
   deletingRoot.value = true
   setActionRunning(true)
   clearLog()
   setSummary(t('pak.deletingRoot', { name }), 'info')
-  log(t('pak.deletingRootLog', { name }))
+  logI18n('pak.deletingRootLog', { name })
   try {
     const result = await electron.deleteManagedPath(targetPath, contentBase.value)
     if (result.success) {
-      log(t('pak.deleteRootDone', { name }), 'success')
+      logI18n('pak.deleteRootDone', { name }, 'success')
       setSummary(t('pak.deleteRootDone', { name }), 'success')
       deleteRootConfirmOpen.value = false
       emit('done')
       emit('close')
     } else {
       deleteRootConfirmOpen.value = false
-      log(t('pak.deleteRootFailed', { error: result.error || '' }), 'error')
+      logI18n('pak.deleteRootFailed', { error: result.error || '' }, 'error')
       setSummary(t('pak.deleteRootFailed', { error: result.error || '' }), 'error')
     }
   } catch (err) {
     deleteRootConfirmOpen.value = false
     const message = err instanceof Error ? err.message : String(err)
-    log(t('pak.deleteRootFailed', { error: message }), 'error')
+    logI18n('pak.deleteRootFailed', { error: message }, 'error')
     setSummary(t('pak.deleteRootFailed', { error: message }), 'error')
   } finally {
     deletingRoot.value = false
     setActionRunning(false)
-    setProgress(0, t('progress.idle'))
+    setProgress(0, 'progress.idle')
   }
 }
 
@@ -357,10 +471,18 @@ function cancelDeleteRoot(): void {
 }
 
 function onDragOver(event: DragEvent): void {
-  if (!isRepaked.value || props.structureOnly || state.actionRunning) return
+  if (listingFolder.value || !repakEditable.value || state.actionRunning) {
+    if (listingFolder.value) {
+      dropActive.value = false
+      dropPakPath.value = null
+      dropTargetFolder.value = ''
+    }
+    return
+  }
   event.preventDefault()
   if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
   dropActive.value = true
+  dropPakPath.value = activePath.value
   dropTargetFolder.value = ''
 }
 
@@ -368,23 +490,26 @@ function onDragLeave(event: DragEvent): void {
   const el = event.currentTarget as HTMLElement | null
   if (el && event.relatedTarget instanceof Node && el.contains(event.relatedTarget)) return
   dropActive.value = false
+  dropPakPath.value = null
 }
 
 async function onDrop(event: DragEvent): Promise<void> {
   const target = dropTargetFolder.value
+  const pakPath = dropPakPath.value
   dropActive.value = false
   dropTargetFolder.value = ''
-  if (!isRepaked.value || props.structureOnly || state.actionRunning) return
+  dropPakPath.value = null
+  if (!pakPath || state.actionRunning) return
+  if (!repakEditable.value && !listingFolder.value) return
   event.preventDefault()
   const dropped = Array.from(event.dataTransfer?.files ?? [])
     .map((file) => (file as FileWithPath).path)
     .filter((path): path is string => typeof path === 'string' && path.length > 0)
   if (dropped.length === 0) return
-  await addDroppedFiles(dropped, target, false)
+  await addDroppedFiles(dropped, target, false, pakPath)
 }
 
-async function addDroppedFiles(paths: string[], targetFolder: string, overwrite: boolean): Promise<void> {
-  const pakPath = props.pakPath
+async function addDroppedFiles(paths: string[], targetFolder: string, overwrite: boolean, pakPath: string): Promise<void> {
   if (!pakPath) return
   // Build plain (non-reactive) values: `paths` may come from a ref and would
   // otherwise be a Vue Proxy, which cannot be structured-cloned over IPC.
@@ -392,7 +517,7 @@ async function addDroppedFiles(paths: string[], targetFolder: string, overwrite:
   setActionRunning(true)
   clearLog()
   setSummary(t('pak.addingFiles', { n: sourcePaths.length }), 'info')
-  log(t('pak.addingFilesLog', { n: sourcePaths.length, folder: targetFolder || '/' }))
+  logI18n('pak.addingFilesLog', { n: sourcePaths.length, folder: targetFolder || '/' })
   try {
     const result = await electron.addFilesToPak({
       pakPath: String(pakPath),
@@ -412,29 +537,29 @@ async function addDroppedFiles(paths: string[], targetFolder: string, overwrite:
       const conflicts = entry.conflicts ?? []
       if (conflicts.length > 0) {
         // Ask once for every conflicting file.
-        pendingDrop.value = { paths, targetFolder, conflicts }
+        pendingDrop.value = { paths, targetFolder, conflicts, pakPath }
         setSummary(t('pak.overwritePromptSummary', { n: conflicts.length }), 'warning')
         return
       }
       const added = entry.added ?? 0
       const replaced = entry.replaced ?? 0
       const skipped = entry.skipped ?? 0
-      log(t('pak.addDone', { added, replaced, skipped }), 'success')
+      logI18n('pak.addDone', { added, replaced, skipped }, 'success')
       setSummary(t('pak.addDone', { added, replaced, skipped }), 'success')
       await loadContents()
       emit('changed')
     } else {
       const failed = (result.results?.failed?.[0] ?? null) as OperationFailure | null
       const message = failed?.error || result.error || ''
-      log(t('pak.addFailed', { error: message }), 'error')
+      logI18n('pak.addFailed', { error: message }, 'error')
       setSummary(t('pak.addFailed', { error: message }), 'error')
     }
   } catch (err) {
-    log(t('pak.addFailed', { error: err instanceof Error ? err.message : String(err) }), 'error')
+    logI18n('pak.addFailed', { error: err instanceof Error ? err.message : String(err) }, 'error')
     setSummary(t('pak.addFailed', { error: err instanceof Error ? err.message : String(err) }), 'error')
   } finally {
     setActionRunning(false)
-    setProgress(0, t('progress.idle'))
+    setProgress(0, 'progress.idle')
   }
 }
 
@@ -447,7 +572,7 @@ async function confirmOverwrite(): Promise<void> {
   const pending = pendingDrop.value
   if (!pending) return
   pendingDrop.value = null
-  await addDroppedFiles(pending.paths, pending.targetFolder, true)
+  await addDroppedFiles(pending.paths, pending.targetFolder, true, pending.pakPath)
 }
 
 function addFile(file: string): void {
@@ -506,7 +631,7 @@ async function buildTreeChunked(source: string[]): Promise<TreeNode> {
 }
 
 async function loadContents(): Promise<void> {
-  const pakPath = props.pakPath
+  const pakPath = activePath.value
   if (!pakPath) return
   const id = ++requestId.value
   loading.value = true
@@ -540,45 +665,48 @@ async function loadContents(): Promise<void> {
 }
 
 async function unpakSelectedEntries(): Promise<void> {
-  const pakPath = props.pakPath
+  const pakPath = activePath.value
   if (!pakPath || selected.value.length === 0 || state.actionRunning) return
   const entries = [...selected.value]
   const shouldDecrypt = decrypt.value
   let succeeded = false
   setActionRunning(true)
   clearLog()
-  const actionText = shouldDecrypt ? t('pak.extractingDecrypting') : t('pak.extracting')
   setSummary(
     shouldDecrypt
       ? t('pak.extractingDecryptingN', { n: entries.length })
       : t('pak.extractingN', { n: entries.length }),
     'info',
   )
-  log(
-    shouldDecrypt
-      ? t('pak.extractingDecryptingNLog', { n: entries.length })
-      : t('pak.extractingNLog', { n: entries.length }),
-  )
+  logI18n(shouldDecrypt ? 'pak.extractingDecryptingNLog' : 'pak.extractingNLog', { n: entries.length })
   try {
     const result = shouldDecrypt
       ? await electron.unpakDecryptPakEntries(pakPath, entries, {
           showFileProgress: getShowFileNames(),
           unpakedDir: state.customDirs.unpaked || undefined,
-          pakDir: state.customDirs.pak || undefined,
+          pakDir: isRepaked.value ? parentDir(pakPath) : state.customDirs.pak || undefined,
         })
       : await electron.unpakPakEntries(pakPath, entries, {
           showFileProgress: getShowFileNames(),
           unpakedDir: state.customDirs.unpaked || undefined,
-          pakDir: state.customDirs.pak || undefined,
+          pakDir: isRepaked.value ? parentDir(pakPath) : state.customDirs.pak || undefined,
         })
     if (result.success) {
       const successCount = result.results?.success.length ?? 0
       const failedCount = result.results?.failed.length ?? 0
-      log(t('pak.actionDone', { action: actionText, ok: successCount, fail: failedCount }), 'success')
+      logI18n(
+        'pak.actionDone',
+        {
+          action: { i18n: shouldDecrypt ? 'pak.extractingDecrypting' : 'pak.extracting' },
+          ok: successCount,
+          fail: failedCount,
+        },
+        'success',
+      )
       if (failedCount > 0) {
         result.results?.failed.forEach((fail) => {
           const entry = fail as OperationFailure
-          log(t('pak.failedItem', { name: entry.packageName, error: entry.error }), 'error')
+          logI18n('pak.failedItem', { name: entry.packageName, error: entry.error }, 'error')
         })
         setSummary(t('pak.partialSummary', { ok: successCount, fail: failedCount }), 'error')
       } else {
@@ -586,17 +714,27 @@ async function unpakSelectedEntries(): Promise<void> {
         succeeded = true
       }
     } else {
-      log(t('pak.actionFailedOp', { error: result.error }), 'error')
+      logI18n('pak.actionFailedOp', { error: result.error }, 'error')
       setSummary(t('pak.extractFailed'), 'error')
     }
   } catch (err) {
-    log(t('pak.unexpectedLog', { error: err instanceof Error ? err.message : String(err) }), 'error')
+    logI18n('pak.unexpectedLog', { error: err instanceof Error ? err.message : String(err) }, 'error')
     setSummary(t('pak.unexpected'), 'error')
   } finally {
     setActionRunning(false)
-    setProgress(0, t('progress.idle'))
+    setProgress(0, 'progress.idle')
     if (succeeded) emit('done')
   }
+}
+
+function leaveDrilledPak(): void {
+  if (state.actionRunning || !drilledPakPath.value) return
+  drilledPakPath.value = null
+  selected.value = []
+  repakedSelected.value = null
+  searchInput.value = ''
+  searchQuery.value = ''
+  void loadContents()
 }
 
 function close(): void {
@@ -615,8 +753,13 @@ function onKeydown(event: KeyboardEvent): void {
       confirmTarget.value = null
       return
     }
-    if (searchQuery.value.length > 0) {
+    if (searchInput.value.length > 0 || searchQuery.value.length > 0) {
+      searchInput.value = ''
       searchQuery.value = ''
+      return
+    }
+    if (drilledPakPath.value) {
+      leaveDrilledPak()
       return
     }
     close()
@@ -625,7 +768,7 @@ function onKeydown(event: KeyboardEvent): void {
   const target = event.target as HTMLElement | null
   const isTextInput =
     !!target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)
-  if (event.key === 'Delete' && !isTextInput && isRepaked.value && !props.structureOnly && repakedSelected.value && !confirmTarget.value && !deleteRootConfirmOpen.value) {
+  if (event.key === 'Delete' && !isTextInput && repakEditable.value && repakedSelected.value && !confirmTarget.value && !deleteRootConfirmOpen.value) {
     event.preventDefault()
     requestDelete()
   }
@@ -638,6 +781,7 @@ watch(
       requestId.value += 1
       selected.value = []
       decrypt.value = false
+      searchInput.value = ''
       searchQuery.value = ''
       error.value = ''
       files.value = []
@@ -646,12 +790,14 @@ watch(
       selectedExpanded.value = new Set()
       dropActive.value = false
       dropTargetFolder.value = ''
+      dropPakPath.value = null
       expandingKey.value = null
       repakedSelected.value = null
       confirmTarget.value = null
       deleteRootConfirmOpen.value = false
       deletingRoot.value = false
       pendingDrop.value = null
+      drilledPakPath.value = null
       void loadContents()
       window.addEventListener('keydown', onKeydown)
     } else {
@@ -661,6 +807,7 @@ watch(
 )
 
 onBeforeUnmount(() => {
+  if (searchTimer) clearTimeout(searchTimer)
   window.removeEventListener('keydown', onKeydown)
 })
 </script>
@@ -674,6 +821,13 @@ onBeforeUnmount(() => {
     >
       <div class="flex flex-none items-center justify-between gap-3 border-b border-border px-5 py-4">
         <div class="flex min-w-0 items-center gap-2">
+          <button
+            v-if="drilledPakPath"
+            type="button"
+            class="box-border inline-flex h-7 items-center rounded-lg border border-border bg-hover px-2 text-xs text-text cursor-pointer transition duration-150 enabled:hover:bg-border disabled:cursor-not-allowed disabled:opacity-50"
+            :disabled="state.actionRunning"
+            @click="leaveDrilledPak"
+          >{{ t('pak.backToFolder') }}</button>
           <h3 class="m-0 min-w-0 truncate text-bright">{{ t('pak.contentsTitle', { name: pakName }) }}</h3>
           <button
             v-if="pakPath"
@@ -714,67 +868,77 @@ onBeforeUnmount(() => {
               class="inline-flex h-5 min-w-5 items-center justify-center rounded-full border border-border bg-deepest px-1.5 text-center text-[11px] font-semibold leading-none tabular-nums whitespace-nowrap text-bright"
             >{{ files.length }}</span>
           </div>
-          <input
-            v-model="searchQuery"
-            class="min-w-0 flex-none rounded-[10px] border border-border bg-deepest px-2.5 py-1.5 text-xs text-text outline-none focus:border-accent focus:shadow-[0_0_0_3px_rgba(79,143,255,0.15)]"
-            type="text"
-            :placeholder="t('pak.searchPlaceholder')"
-          />
-          <div class="flex min-h-0 flex-1 flex-col overflow-x-hidden overflow-y-auto rounded-lg border border-border bg-deepest p-1 font-mono text-xs">
-            <div v-if="loading || treeBuilding" class="flex flex-1 items-center justify-center gap-2 text-[13px] text-dim">
+          <div class="relative min-w-0 flex-none">
+            <input
+              v-model="searchInput"
+              class="w-full min-w-0 rounded-[10px] border border-border bg-deepest py-1.5 pl-2.5 pr-8 text-xs text-text outline-none focus:border-accent focus:shadow-[0_0_0_3px_rgba(79,143,255,0.15)]"
+              type="text"
+              :placeholder="t('pak.searchPlaceholder')"
+            />
+            <span
+              v-if="searchPending || searchBusy"
+              class="pointer-events-none absolute right-2 top-1/2 inline-block h-3.5 w-3.5 -translate-y-1/2 animate-spin rounded-full border-2 border-white/35 border-t-white"
+            ></span>
+          </div>
+          <div
+            :ref="bindLeftScroll"
+            class="relative min-h-0 flex-1 overflow-x-hidden overflow-y-auto rounded-lg border border-border bg-deepest font-mono text-xs"
+            @scroll="onLeftScroll"
+          >
+            <div v-if="loading || treeBuilding" class="flex h-full items-center justify-center gap-2 text-[13px] text-dim">
               <span class="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/35 border-t-white"></span>{{ t('pak.loadingContents') }}
             </div>
-            <div v-else-if="error" class="flex flex-1 items-center justify-center gap-2 text-[13px] text-red">{{ error }}</div>
-            <div v-else-if="files.length === 0" class="flex flex-1 items-center justify-center gap-2 text-[13px] text-dim">{{ t('pak.noFiles') }}</div>
-            <div v-else-if="searchActive && leftRows.length === 0" class="flex flex-1 items-center justify-center gap-2 text-[13px] text-dim">{{ t('pak.searchEmpty') }}</div>
-            <template v-else>
+            <div v-else-if="error" class="flex h-full items-center justify-center gap-2 text-[13px] text-red">{{ error }}</div>
+            <div v-else-if="files.length === 0" class="flex h-full items-center justify-center gap-2 text-[13px] text-dim">{{ t('pak.noFiles') }}</div>
+            <div v-else-if="searchActive && leftRows.length === 0" class="flex h-full items-center justify-center gap-2 text-[13px] text-dim">{{ t('pak.searchEmpty') }}</div>
+            <div v-else class="relative w-full" :style="{ height: `${leftTotalHeight}px` }">
             <div
-              v-for="row in leftRows"
-              :key="row.key"
-              class="flex min-h-7 cursor-pointer items-center gap-1.5 overflow-hidden whitespace-nowrap rounded px-1.5 py-[3px] hover:bg-hover"
+              v-for="item in visibleLeftRows"
+              :key="item.row.key"
+              class="absolute inset-x-0 flex h-7 cursor-pointer items-center gap-1.5 overflow-hidden whitespace-nowrap px-1.5 hover:bg-hover"
               :class="{
-                'bg-accent/[0.18]': !isRepaked && !row.isDir && isSelected(row.key),
-                'bg-accent/30': isRepaked && !structureOnly && repakedSelected?.key === row.key,
-                'bg-green/[0.22] outline-dashed outline-1 -outline-offset-1 outline-green': isRepaked && !structureOnly && dropActive && dropTargetFolder === row.key && row.isDir,
+                'bg-accent/[0.18]': !listingFolder && !item.row.isDir && isSelected(item.row.key),
+                'bg-accent/30': repakEditable && repakedSelected?.key === item.row.key,
+                'bg-green/[0.22] outline-dashed outline-1 -outline-offset-1 outline-green': rowDropHighlight(item.row),
               }"
-              :style="{ paddingLeft: `${4 + row.depth * 14}px` }"
-              @click="onRowClick(row)"
-              @dragover.stop="onRowDragOver(row, $event)"
+              :style="{ top: `${item.index * VIRTUAL_ROW_HEIGHT}px`, paddingLeft: `${4 + item.row.depth * 14}px` }"
+              @click="onRowClick(item.row)"
+              @dragover.stop="onRowDragOver(item.row, $event)"
             >
               <button
-                v-if="row.isDir"
+                v-if="item.row.isDir"
                 type="button"
                 class="inline-flex h-[18px] w-[18px] min-w-[18px] flex-none items-center justify-center rounded border border-border bg-transparent p-0 text-[15px] font-bold leading-none text-text cursor-pointer transition duration-150 enabled:hover:bg-hover"
                 :title="t('pak.toggleFolderHint')"
                 :disabled="state.actionRunning || expandingKey !== null"
-                @click.stop="toggleNode(row.key)"
+                @click.stop="toggleNode(item.row.key)"
               >
-                <span v-if="expandingKey === row.key" class="inline-block h-2.5 w-2.5 animate-spin rounded-full border-2 border-white/35 border-t-white"></span>
-                <template v-else>{{ row.expanded ? '−' : '+' }}</template>
+                <span v-if="expandingKey === item.row.key" class="inline-block h-2.5 w-2.5 animate-spin rounded-full border-2 border-white/35 border-t-white"></span>
+                <template v-else>{{ item.row.expanded ? '−' : '+' }}</template>
               </button>
               <span v-else class="w-[18px] flex-none"></span>
-              <svg v-if="row.isDir" class="h-[18px] w-7 flex-none text-accent" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+              <svg v-if="item.row.isDir" class="h-[18px] w-7 flex-none text-accent" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
                 <path d="M1.4 3.6a1.2 1.2 0 0 1 1.2-1.2h3l1.4 1.6h6.4a1.2 1.2 0 0 1 1.2 1.2v6.2a1.2 1.2 0 0 1-1.2 1.2H2.6a1.2 1.2 0 0 1-1.2-1.2z" />
               </svg>
-              <span v-else class="inline-flex h-[18px] w-7 flex-none items-center justify-center rounded border border-accent/55 bg-accent/[0.16] px-0.5 font-sans text-[7px] font-bold uppercase leading-none tracking-[0.2px] text-accent">{{ fileExt(row.name) }}</span>
-              <span class="min-w-0 flex-1 truncate" :class="row.isDir ? 'text-bright' : 'text-text'" :title="row.key">{{ row.name }}</span>
-              <span v-if="showRowCount(row)" class="ml-2 min-w-10 flex-none text-right text-[11px] tabular-nums text-dim">{{ rowFileCount(row) }}</span>
+              <span v-else class="inline-flex h-[18px] w-7 flex-none items-center justify-center rounded border border-accent/55 bg-accent/[0.16] px-0.5 font-sans text-[7px] font-bold uppercase leading-none tracking-[0.2px] text-accent">{{ fileExt(item.row.name) }}</span>
+              <span class="min-w-0 flex-1 truncate" :class="item.row.isDir ? 'text-bright' : 'text-text'" :title="listingFolder && isRepaked && !item.row.isDir && isPakName(item.row.name) ? t('pak.openPakHint') : item.row.key">{{ item.row.name }}</span>
+              <span v-if="showRowCount(item.row)" class="ml-2 min-w-10 flex-none text-right text-[11px] tabular-nums text-dim">{{ rowFileCount(item.row) }}</span>
               <button
-                v-if="!isRepaked && !structureOnly && row.isDir"
+                v-if="!listingFolder && item.row.isDir"
                 type="button"
                 class="ml-1 inline-flex h-[18px] w-[18px] min-w-[18px] flex-none items-center justify-center rounded border-none bg-transparent p-0 text-[13px] leading-none text-dim cursor-pointer enabled:hover:bg-accent/20 enabled:hover:text-bright"
                 :title="t('pak.addFolderHint')"
                 :disabled="state.actionRunning"
-                @click.stop="addFolder(row.node)"
+                @click.stop="addFolder(item.row.node)"
               >&#8594;</button>
               <span v-else class="w-[18px] flex-none"></span>
             </div>
-            </template>
+            </div>
           </div>
-          <div v-if="isRepaked && !structureOnly" class="flex flex-none items-center justify-between gap-3 text-xs text-dim">
-            <span class="truncate">{{ dropActive ? t('pak.dropOverlay') : t('pak.dropHint') }}</span>
+          <div v-if="isRepaked" class="flex flex-none items-center justify-between gap-3 text-xs text-dim">
+            <span class="truncate">{{ dropActive ? t('pak.dropOverlay') : (listingFolder ? t('pak.dropOnPakHint') : t('pak.dropHint')) }}</span>
           </div>
-          <div v-if="isRepaked && !structureOnly && dropActive" class="pointer-events-none absolute inset-0 flex items-center justify-center rounded-lg border border-accent bg-accent/12 p-4 text-center text-sm font-semibold text-bright">
+          <div v-if="repakEditable && dropActive" class="pointer-events-none absolute inset-0 flex items-center justify-center rounded-lg border border-accent bg-accent/12 p-4 text-center text-sm font-semibold text-bright">
             <span>{{ t('pak.dropOverlay') }}</span>
           </div>
         </div>
@@ -783,45 +947,51 @@ onBeforeUnmount(() => {
             <span>{{ t('pak.selectedFiles') }}</span>
             <span class="inline-flex h-5 min-w-5 items-center justify-center rounded-full border border-border bg-deepest px-1.5 text-center text-[11px] font-semibold leading-none tabular-nums whitespace-nowrap text-bright">{{ selected.length }}</span>
           </div>
-          <div class="flex min-h-0 flex-1 flex-col overflow-x-hidden overflow-y-auto rounded-lg border border-border bg-deepest p-1 font-mono text-xs">
-            <div v-if="selected.length === 0" class="flex h-full flex-1 items-center justify-center p-4 text-center font-sans text-[13px] text-dim">{{ t('pak.selectFilesFirst') }}</div>
+          <div
+            :ref="bindSelectedScroll"
+            class="relative min-h-0 flex-1 overflow-x-hidden overflow-y-auto rounded-lg border border-border bg-deepest font-mono text-xs"
+            @scroll="onSelectedScroll"
+          >
+            <div v-if="selected.length === 0" class="flex h-full items-center justify-center p-4 text-center font-sans text-[13px] text-dim">{{ t('pak.selectFilesFirst') }}</div>
+            <div v-else class="relative w-full" :style="{ height: `${selectedTotalHeight}px` }">
             <div
-              v-for="row in selectedRows"
-              :key="row.key"
-              class="flex min-h-7 cursor-pointer items-center gap-1.5 overflow-hidden whitespace-nowrap rounded px-1.5 py-[3px] hover:bg-hover"
-              :style="{ paddingLeft: `${4 + row.depth * 14}px` }"
-              @click="!row.isDir && removeFile(row.key)"
+              v-for="item in visibleSelectedRows"
+              :key="item.row.key"
+              class="absolute inset-x-0 flex h-7 cursor-pointer items-center gap-1.5 overflow-hidden whitespace-nowrap px-1.5 hover:bg-hover"
+              :style="{ top: `${item.index * VIRTUAL_ROW_HEIGHT}px`, paddingLeft: `${4 + item.row.depth * 14}px` }"
+              @click="!item.row.isDir && removeFile(item.row.key)"
             >
               <button
-                v-if="row.isDir"
+                v-if="item.row.isDir"
                 type="button"
                 class="inline-flex h-[18px] w-[18px] min-w-[18px] flex-none items-center justify-center rounded border border-border bg-transparent p-0 text-[15px] font-bold leading-none text-text cursor-pointer transition duration-150 enabled:hover:bg-hover"
                 :title="t('pak.toggleFolderHint')"
                 :disabled="state.actionRunning"
-                @click.stop="toggleSelectedNode(row.key)"
-              >{{ selectedExpanded.has(row.key) ? '−' : '+' }}</button>
+                @click.stop="toggleSelectedNode(item.row.key)"
+              >{{ selectedExpanded.has(item.row.key) ? '−' : '+' }}</button>
               <span v-else class="w-[18px] flex-none"></span>
-              <svg v-if="row.isDir" class="h-[18px] w-7 flex-none text-accent" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+              <svg v-if="item.row.isDir" class="h-[18px] w-7 flex-none text-accent" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
                 <path d="M1.4 3.6a1.2 1.2 0 0 1 1.2-1.2h3l1.4 1.6h6.4a1.2 1.2 0 0 1 1.2 1.2v6.2a1.2 1.2 0 0 1-1.2 1.2H2.6a1.2 1.2 0 0 1-1.2-1.2z" />
               </svg>
-              <span v-else class="inline-flex h-[18px] w-7 flex-none items-center justify-center rounded border border-accent/55 bg-accent/[0.16] px-0.5 font-sans text-[7px] font-bold uppercase leading-none tracking-[0.2px] text-accent">{{ fileExt(row.name) }}</span>
+              <span v-else class="inline-flex h-[18px] w-7 flex-none items-center justify-center rounded border border-accent/55 bg-accent/[0.16] px-0.5 font-sans text-[7px] font-bold uppercase leading-none tracking-[0.2px] text-accent">{{ fileExt(item.row.name) }}</span>
               <span
                 class="min-w-0 flex-1 truncate"
-                :class="row.isDir ? 'text-bright' : 'text-text'"
-                :title="row.isDir ? t('pak.toggleFolderHint') : row.key"
-                @click="row.isDir ? toggleSelectedNode(row.key) : removeFile(row.key)"
-              >{{ row.name }}</span>
-              <span v-if="showRowCount(row)" class="ml-2 min-w-10 flex-none text-right text-[11px] tabular-nums text-dim">{{ rowFileCount(row) }}</span>
+                :class="item.row.isDir ? 'text-bright' : 'text-text'"
+                :title="item.row.isDir ? t('pak.toggleFolderHint') : item.row.key"
+                @click="item.row.isDir ? toggleSelectedNode(item.row.key) : removeFile(item.row.key)"
+              >{{ item.row.name }}</span>
+              <span v-if="showRowCount(item.row)" class="ml-2 min-w-10 flex-none text-right text-[11px] tabular-nums text-dim">{{ rowFileCount(item.row) }}</span>
               <button
                 type="button"
                 class="ml-1 inline-flex h-[18px] w-[18px] min-w-[18px] flex-none items-center justify-center rounded border-none bg-transparent p-0 text-[14px] leading-none text-dim cursor-pointer enabled:hover:bg-red/[0.18] enabled:hover:text-red"
-                :title="row.isDir ? t('pak.removeFolderHint') : t('pak.removeFileHint')"
+                :title="item.row.isDir ? t('pak.removeFolderHint') : t('pak.removeFileHint')"
                 :disabled="state.actionRunning"
-                @click.stop="row.isDir ? removeFolder(row.node) : removeFile(row.key)"
+                @click.stop="item.row.isDir ? removeFolder(item.row.node) : removeFile(item.row.key)"
               >×</button>
             </div>
+            </div>
           </div>
-          <div v-if="!isRepaked" class="flex flex-none items-center justify-between gap-3">
+          <div class="flex flex-none items-center justify-between gap-3">
             <label
               class="relative inline-flex cursor-pointer select-none items-center gap-2 text-[13px] text-text has-[:disabled]:pointer-events-none has-[:disabled]:opacity-50"
               v-app-title="t('pak.decryptAfterHint')"

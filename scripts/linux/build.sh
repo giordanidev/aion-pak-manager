@@ -78,6 +78,9 @@ VERSION="$(node -p "require('./package.json').version" 2>/dev/null || echo 0.0.0
 log "Build Linux $(arch_raw) — $APP_DISPLAY $VERSION ($(distro_label)) — alvos: $TARGETS"
 
 # --- 4) Bundle (renderer + main) ---------------------------------------------
+# The Linux work copy excludes .git; take the hash from the real repo so the
+# packaged app shows the same commit as the Windows build.
+export AION_GIT_COMMIT="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 npm run build:app
 
 # --- 5) Empacotar ------------------------------------------------------------

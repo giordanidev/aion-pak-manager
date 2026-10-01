@@ -15,6 +15,8 @@ function readAppVersion(): string {
 }
 
 function readAppCommit(): string {
+  const fromEnv = process.env.AION_GIT_COMMIT?.trim()
+  if (fromEnv) return fromEnv
   try {
     return execSync('git rev-parse --short HEAD', { encoding: 'utf-8' }).trim() || 'unknown'
   } catch {
@@ -42,7 +44,10 @@ export default defineConfig({
           // fully inlined CJS (no shared chunks) after electron-vite build.
           'workers/decrypt-task': resolve(__dirname, 'backend/workers/decrypt-task.ts'),
           'workers/unpak-task': resolve(__dirname, 'backend/workers/unpak-task.ts'),
-          'workers/repak-task': resolve(__dirname, 'backend/workers/repak-task.ts')
+          'workers/repak-task': resolve(__dirname, 'backend/workers/repak-task.ts'),
+          'workers/count-task': resolve(__dirname, 'backend/workers/count-task.ts'),
+          'workers/scan-folder-task': resolve(__dirname, 'backend/workers/scan-folder-task.ts'),
+          'workers/pak-scan-task': resolve(__dirname, 'backend/workers/pak-scan-task.ts')
         }
       }
     }

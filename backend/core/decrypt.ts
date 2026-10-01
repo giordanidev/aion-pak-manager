@@ -10,7 +10,7 @@ export interface DecryptProgress {
 	file: string;
 }
 
-function collectDecryptableFiles(folderPath: string): string[] {
+export function listDecryptableFiles(folderPath: string): string[] {
 	const entries: string[] = [];
 	function walk(dir: string): void {
 		for (const name of readdirSync(dir)) {
@@ -84,7 +84,7 @@ export function decryptFolder(folderPath: string, progressCallback?: (info: Decr
 		throw new Error(`Input folder not found: ${resolved}`);
 	}
 
-	const files = collectDecryptableFiles(resolved);
+	const files = listDecryptableFiles(resolved);
 	for (let i = 0; i < files.length; i += 1) {
 		const file = files[i];
 		decryptFile(file);

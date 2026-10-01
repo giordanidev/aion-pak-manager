@@ -5,10 +5,20 @@ import { getShowFileNames, useElectron } from './useElectron'
 
 export type LogType = 'info' | 'success' | 'warning' | 'error'
 
+/** A value interpolated into a log line. `{ i18n }` is translated when the line renders. */
+export type LogParam = string | number | undefined | { i18n: string; params?: Record<string, LogParam> }
+
+export interface LogPart {
+  text?: string
+  key?: string
+  params?: Record<string, LogParam>
+}
+
 export interface LogEntry {
   id: number
   type: LogType
-  message: string
+  /** Pieces rendered live, so a locale change rewrites the line immediately. */
+  parts: LogPart[]
 }
 
 let logId = 0
@@ -47,6 +57,9 @@ function readStoredDir(key: ListKey): string {
 const state = reactive({
   progressPercent: 0,
   progressText: '',
+  /** i18n key for the progress label, rendered in the UI so it follows the locale. */
+  progressI18nKey: 'progress.idle',
+  progressI18nParams: {} as Record<string, unknown>,
   summaryText: '',
   summaryType: 'info' as LogType,
   actionRunning: false,
@@ -233,12 +246,10 @@ export function useAppState() {
     t = (key: string) => key
   }
 
-  if (!state.progressText || ['Ocioso', 'Pronto', 'Idle', 'Ready', 'Inactivo', 'Listo'].includes(state.progressText)) {
-    state.progressText = t('progress.idle')
-  }
+  if (!state.progressI18nKey) state.progressI18nKey = 'progress.idle'
 
-  function log(message: string, type: LogType = 'info'): void {
-    state.logEntries.push({ id: ++logId, type, message })
+  function pushLog(parts: LogPart[], type: LogType): void {
+    state.logEntries.push({ id: ++logId, type, parts })
     // Cap DOM growth: keep last 2000 entries, but never drop error/warning.
     const MAX_LOG_ENTRIES = 2000
     if (state.logEntries.length > MAX_LOG_ENTRIES) {
@@ -255,13 +266,28 @@ export function useAppState() {
     }
   }
 
+  function log(message: string, type: LogType = 'info'): void {
+    pushLog([{ text: message }], type)
+  }
+
+  /** Stores a translation key so the activity log updates as soon as the locale changes. */
+  function logI18n(key: string, params?: Record<string, LogParam>, type: LogType = 'info'): void {
+    pushLog([{ key, params }], type)
+  }
+
+  function logParts(parts: LogPart[], type: LogType = 'info'): void {
+    pushLog(parts, type)
+  }
+
   function clearLog(): void {
     state.logEntries = []
   }
 
-  function setProgress(percent: number, text: string): void {
+  function setProgress(percent: number, key: string, params?: Record<string, unknown>): void {
     state.progressPercent = Math.max(0, Math.min(percent, 100))
-    state.progressText = text
+    state.progressI18nKey = key
+    state.progressI18nParams = params ?? {}
+    state.progressText = key
     if (state.progressStartedAt != null && state.actionRunning) {
       state.progressElapsedSeconds = Math.floor((Date.now() - state.progressStartedAt) / 1000)
     }
@@ -296,7 +322,7 @@ export function useAppState() {
             ? `${(progressBytesRead / elapsedSec / (1024 * 1024)).toFixed(1)} MB/s`
             : '--'
         const size = progressBytesRead > 0 ? formatBytes(progressBytesRead) : '--'
-        log(t('progress.actionSummary', { elapsed: formatDuration(elapsedSec), speed, size }), 'info')
+        logI18n('progress.actionSummary', { elapsed: formatDuration(elapsedSec), speed, size }, 'info')
       }
       stopProgressTiming()
       progressBytesRead = 0
@@ -429,6 +455,11 @@ export function useAppState() {
     state.progressBatch = batch
   }
 
+  interface ProgressLabel {
+    key: string
+    params?: Record<string, unknown>
+  }
+
   /**
    * Progress label:
    * - Multi-folder batch: `Pasta (folderI/folderN) - folderName (pakI/pakN)`
@@ -441,7 +472,7 @@ export function useAppState() {
     packageTotal: number,
     current?: number,
     files?: number,
-  ): string {
+  ): ProgressLabel {
     const batch = state.progressBatch
     const useBatch = batch != null && batch.total > 1
     if (useBatch) {
@@ -449,19 +480,12 @@ export function useAppState() {
       const pakCurrent = packageTotal > 0 ? Math.max(1, Math.min(packageIndex || 1, packageTotal)) : undefined
       const pakTotal = packageTotal > 0 ? packageTotal : undefined
       if (typeof pakCurrent === 'number' && typeof pakTotal === 'number') {
-        return t('progress.unpackingMulti', {
-          i: batch.index,
-          total: batch.total,
-          pkg: folderName,
-          current: pakCurrent,
-          files: pakTotal,
-        })
+        return {
+          key: 'progress.unpackingMulti',
+          params: { i: batch.index, total: batch.total, pkg: folderName, current: pakCurrent, files: pakTotal },
+        }
       }
-      return t('progress.unpackingMultiPlain', {
-        i: batch.index,
-        total: batch.total,
-        pkg: folderName,
-      })
+      return { key: 'progress.unpackingMultiPlain', params: { i: batch.index, total: batch.total, pkg: folderName } }
     }
 
     const i = packageIndex
@@ -469,30 +493,23 @@ export function useAppState() {
     const isMulti = total > 1
     const hasCounts = typeof files === 'number' && files > 0 && typeof current === 'number'
     if (isMulti && hasCounts) {
-      return t('progress.unpackingMulti', {
-        i: Math.max(1, Math.min(i, total)),
-        total,
-        pkg,
-        current,
-        files,
-      })
+      return {
+        key: 'progress.unpackingMulti',
+        params: { i: Math.max(1, Math.min(i, total)), total, pkg, current, files },
+      }
     }
     if (isMulti) {
-      return t('progress.unpackingMultiPlain', {
-        i: Math.max(1, Math.min(i, total)),
-        total,
-        pkg,
-      })
+      return { key: 'progress.unpackingMultiPlain', params: { i: Math.max(1, Math.min(i, total)), total, pkg } }
     }
     if (hasCounts) {
-      return t('progress.unpackingSingle', { pkg, current, files })
+      return { key: 'progress.unpackingSingle', params: { pkg, current, files } }
     }
-    return t('progress.unpackingSinglePlain', { pkg })
+    return { key: 'progress.unpackingSinglePlain', params: { pkg } }
   }
 
   function updateAppProgress(progress: ProgressPayload): void {
-    let message = ''
-    let logMessage: string | null = null
+    let label: ProgressLabel = { key: 'progress.working' }
+    let logLabel: ProgressLabel | null = null
     let percent = progress.percent ?? 0
     const pkg = progress.packageName ?? ''
     const base = basename(pkg)
@@ -501,6 +518,7 @@ export function useAppState() {
     const totalForText = packageTotal > 0 ? packageTotal : 1
     const fileCurrent = typeof progress.current === 'number' ? progress.current : undefined
     const fileTotal = typeof progress.total === 'number' ? progress.total : undefined
+    const itemName = state.progressBatch?.label || base || basename(progress.fileName ?? '') || pkg
     // Global percent from the backend, or folded from the task index when the
     // backend only reports a per-task percent.
     const globalPercent = (): number => {
@@ -512,101 +530,103 @@ export function useAppState() {
 
     switch (progress.stage) {
       case 'extract-folder-start':
-        message = t('progress.preparingExtract')
+        label = { key: 'progress.preparingExtract' }
         percent = clampProgress(progress.percent ?? actionHighWater)
         break
+      case 'extract-folder-scan':
+        label = { key: 'progress.scanningFiles', params: { n: progress.current ?? 0 } }
+        percent = clampProgress(progress.percent ?? 0)
+        break
+      case 'extract-folder-classify':
+        label = {
+          key: 'progress.classifyingFiles',
+          params: { current: progress.current ?? 0, total: progress.total ?? 0 },
+        }
+        percent = clampProgress(progress.percent ?? 0)
+        break
       case 'extract-folder': {
-        // Prep phase (scan/classify) stays below VERIFY_SHARE (10%); real extract uses `unpack`.
-        const prepPercent = progress.percent ?? 0
-        if (prepPercent < 10 && (packageTotal <= 0 || packageIndex <= 0)) {
-          message = t('progress.preparingExtract')
+        // Copy / legacy-db cleanup. File counts mean real work; otherwise stay on prep.
+        if ((fileTotal ?? 0) > 0 || (fileCurrent ?? 0) > 0) {
+          label = formatItemProgressText(itemName || '…', packageIndex, totalForText, fileCurrent, fileTotal)
         } else {
-          message = formatItemProgressText(
-            state.progressBatch?.label || base || basename(progress.fileName ?? '') || t('progress.extractingFolder'),
-            packageIndex,
-            totalForText,
-            fileCurrent,
-            fileTotal,
-          )
+          label = { key: 'progress.preparingExtract' }
         }
         percent = clampProgress(progress.percent ?? 0)
         break
       }
-      case 'extract-folder-check':
-        message = t('progress.preparingExtract')
+      case 'extract-folder-check': {
+        const name = base || pkg
+        if (packageTotal > 1) {
+          label = {
+            key: 'progress.checkingPak',
+            params: { pkg: name, i: Math.max(1, packageIndex), total: packageTotal },
+          }
+        } else {
+          label = { key: 'progress.checkingFolder', params: { pkg: name } }
+        }
         percent = clampProgress(progress.percent ?? 0)
         break
+      }
       case 'extract-folder-done':
-        message = t('progress.ready')
+        label = { key: 'progress.ready' }
         percent = 100
         break
       case 'unpack-start':
-        message = formatItemProgressText(
-          state.progressBatch?.label || base || pkg,
-          packageIndex,
-          totalForText,
-          fileCurrent,
-          fileTotal,
-        )
-        logMessage = t('progress.unpackingStart', { pkg: base, i: packageIndex, total: totalForText })
+        label = formatItemProgressText(itemName || pkg, packageIndex, totalForText, fileCurrent, fileTotal)
+        logLabel = { key: 'progress.unpackingStart', params: { pkg: base, i: packageIndex, total: totalForText } }
         percent = globalPercent()
         break
       case 'unpack':
-        message = formatItemProgressText(
-          state.progressBatch?.label || base || pkg,
-          packageIndex,
-          totalForText,
-          fileCurrent,
-          fileTotal,
-        )
+        label = formatItemProgressText(itemName || pkg, packageIndex, totalForText, fileCurrent, fileTotal)
         percent = globalPercent()
         break
       case 'unpack-done':
-        message = formatItemProgressText(
-          state.progressBatch?.label || base || pkg,
-          packageIndex,
-          totalForText,
-          fileCurrent,
-          fileTotal,
-        )
-        logMessage = t('progress.unpacked', { pkg: base })
+        label = formatItemProgressText(itemName || pkg, packageIndex, totalForText, fileCurrent, fileTotal)
+        logLabel = { key: 'progress.unpacked', params: { pkg: base } }
         percent = clampProgress(progress.percent ?? actionHighWater)
         break
       case 'decrypt-start':
-        message = t('progress.decryptingStart', { pkg })
+        label = { key: 'progress.decryptingStart', params: { pkg } }
+        logLabel = label
         percent = clampProgress(progress.percent ?? actionHighWater)
         break
       case 'decrypt':
-        message = formatItemProgressText(pkg || base, packageIndex, totalForText, fileCurrent, fileTotal)
+        label = formatItemProgressText(pkg || base, packageIndex, totalForText, fileCurrent, fileTotal)
         percent = globalPercent()
         break
       case 'decrypt-done':
-        message = t('progress.decrypted', { pkg })
+        label = { key: 'progress.decrypted', params: { pkg } }
+        logLabel = label
         percent = clampProgress(progress.percent ?? actionHighWater)
         break
       case 'repak-start':
-        message = t('progress.repakingStart', { pkg })
+        label = { key: 'progress.repakingStart', params: { pkg } }
+        logLabel = label
         percent = clampProgress(progress.percent ?? actionHighWater)
         break
       case 'repak':
-        message = formatItemProgressText(pkg || base, packageIndex, totalForText, fileCurrent, fileTotal)
+        label = formatItemProgressText(pkg || base, packageIndex, totalForText, fileCurrent, fileTotal)
         percent = globalPercent()
         break
       case 'repak-done':
-        message = t('progress.repaked', { pkg })
+        label = { key: 'progress.repaked', params: { pkg } }
+        logLabel = label
         percent = clampProgress(progress.percent ?? actionHighWater)
         break
       case 'canceled':
         wasCanceled = true
-        message = progress.packageName ? t('progress.canceledPkg', { pkg }) : t('progress.canceled')
+        label = progress.packageName
+          ? { key: 'progress.canceledPkg', params: { pkg } }
+          : { key: 'progress.canceled' }
+        logLabel = label
         percent = clampProgress(progress.percent ?? actionHighWater)
         break
       case 'unpaked-repak-done':
-        message = t('progress.ready')
+        label = { key: 'progress.ready' }
         percent = clampProgress(progress.percent ?? actionHighWater)
         break
       default:
-        message = t('progress.working')
+        label = { key: 'progress.working' }
     }
 
     if (typeof progress.bytesDelta === 'number' && progress.bytesDelta > 0) {
@@ -622,18 +642,14 @@ export function useAppState() {
       refreshLiveSpeed()
     }
 
-    setProgress(percent, message)
+    setProgress(percent, label.key, label.params)
     // File names only go to the log (when toggle ON), from the batched fileNames[].
     // extract-folder is throttled like unpack/decrypt (never logged per event).
     if (progress.stage === 'extract-folder' || progress.stage === 'unpack' || progress.stage === 'decrypt' || progress.stage === 'repak') {
       flushFileNamesToLog((progress as Record<string, unknown>).fileNames)
     }
-    if (
-      ['unpack-start', 'unpack-done', 'decrypt-start', 'decrypt-done', 'repak-start', 'repak-done', 'canceled'].includes(
-        progress.stage
-      )
-    ) {
-      log(logMessage ?? message, 'info')
+    if (logLabel) {
+      logI18n(logLabel.key, logLabel.params as Record<string, LogParam> | undefined, 'info')
       // Boundary flushes may also carry a name batch.
       flushFileNamesToLog((progress as Record<string, unknown>).fileNames)
     }
@@ -667,7 +683,7 @@ export function useAppState() {
     const pakDir = dirLabel('pak')
     const unpakedDir = dirLabel('unpaked')
     try {
-      setProgress(0, t('progress.refreshing', { pakDir, unpakedDir }))
+      setProgress(0, 'progress.refreshing', { pakDir, unpakedDir })
       const [paksResp, unpakedResp] = await Promise.all([
         electron.scanPaks(state.customDirs.pak || undefined),
         electron.scanUnpaked(state.customDirs.unpaked || undefined, state.customDirs.repaked || undefined),
@@ -694,7 +710,7 @@ export function useAppState() {
         state.pakScanFailed = true
         state.pakFiles = []
         state.rootFolders = []
-        log(t('common.scanPakFail', { error: paksError, dir: pakDir }), 'error')
+        logI18n('common.scanPakFail', { error: paksError ?? '', dir: pakDir }, 'error')
         setSummary(t('common.scanPakFailSummary', { dir: pakDir }), 'error')
       } else {
         state.pakScanFailed = false
@@ -702,10 +718,10 @@ export function useAppState() {
         state.rootFolders = reconcileList(prevRootFolders, rootFolders)
         if (!pakFiles || pakFiles.length === 0) {
           if (rootFolders.length > 0) {
-            log(t('common.foundRootFolders', { n: rootFolders.length, dir: pakDir }), 'info')
+            logI18n('common.foundRootFolders', { n: rootFolders.length, dir: pakDir }, 'info')
           }
         } else {
-          log(t('common.foundPaks', { n: pakFiles.length, dir: pakDir }), 'success')
+          logI18n('common.foundPaks', { n: pakFiles.length, dir: pakDir }, 'success')
         }
       }
 
@@ -714,14 +730,14 @@ export function useAppState() {
         state.unpakedFolders = []
         state.repakedFiles = []
         state.repakedCount = 0
-        log(t('common.scanUnpakedFail', { error: unpakedError, dir: unpakedDir }), 'error')
+        logI18n('common.scanUnpakedFail', { error: unpakedError ?? '', dir: unpakedDir }, 'error')
       } else {
         state.trScanFailed = false
         state.unpakedFolders = reconcileList(prevUnpakedFolders, unpakedFolders ?? [])
         state.repakedFiles = reconcileList(prevRepakedFiles, repakedFiles)
         state.repakedCount = state.repakedFiles.length
         if (unpakedFolders && unpakedFolders.length > 0) {
-          log(t('common.foundUnpaked', { n: unpakedFolders.length, dir: unpakedDir }), 'success')
+          logI18n('common.foundUnpaked', { n: unpakedFolders.length, dir: unpakedDir }, 'success')
         }
       }
 
@@ -749,15 +765,32 @@ export function useAppState() {
       const pakCount = pakFiles?.length ?? 0
       const unpakedCount = unpakedFolders?.length ?? 0
       setSummary(t('common.summaryCounts', { paks: pakCount, unpaked: unpakedCount, dir: unpakedDir }), 'success')
-      setProgress(0, t('progress.idle'))
+      setProgress(0, 'progress.idle')
     } catch (err) {
-      log(t('common.scanError', { error: err instanceof Error ? err.message : String(err) }), 'error')
+      logI18n('common.scanError', { error: err instanceof Error ? err.message : String(err) }, 'error')
       setSummary(t('common.scanErrorSummary'), 'error')
-      setProgress(0, t('common.scanFailProgress'))
+      setProgress(0, 'common.scanFailProgress')
     } finally {
       setListsRefreshing(false)
     }
   }
 
-  return { state, log, clearLog, setProgress, resetProgressBar, setProgressBatch, setSummary, setActionRunning, setListsRefreshing, updateAppProgress, refreshLists, recountAllCounts, setCustomDir, dirLabel }
+  return {
+    state,
+    log,
+    logI18n,
+    logParts,
+    clearLog,
+    setProgress,
+    resetProgressBar,
+    setProgressBatch,
+    setSummary,
+    setActionRunning,
+    setListsRefreshing,
+    updateAppProgress,
+    refreshLists,
+    recountAllCounts,
+    setCustomDir,
+    dirLabel,
+  }
 }

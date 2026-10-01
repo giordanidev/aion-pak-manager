@@ -32,7 +32,7 @@ const updateDisabled = computed(() => !canUpdate.value || downloading.value || p
 
 const { t } = useI18n()
 const electron = useElectron()
-const { recountAllCounts, log, setSummary } = useAppState()
+const { recountAllCounts, logI18n, setSummary } = useAppState()
 
 const appVersion = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : ''
 
@@ -140,14 +140,14 @@ async function onRecountCounts(): Promise<void> {
   recounting.value = true
   try {
     setSummary(t('settings.recounting'), 'info')
-    log(t('settings.recounting'), 'info')
+    logI18n('settings.recounting', undefined, 'info')
     await recountAllCounts()
     setSummary(t('settings.recountStarted'), 'success')
-    log(t('settings.recountStarted'), 'success')
+    logI18n('settings.recountStarted', undefined, 'success')
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     setSummary(t('settings.recountFailed', { error: message }), 'error')
-    log(t('settings.recountFailed', { error: message }), 'error')
+    logI18n('settings.recountFailed', { error: message }, 'error')
   } finally {
     recounting.value = false
   }

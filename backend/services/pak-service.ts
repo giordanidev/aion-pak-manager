@@ -1,12 +1,12 @@
 import { promises as fsp } from 'fs'
 import path from 'path'
+import { MessageChannel } from 'node:worker_threads'
 import { Piscina } from 'piscina'
 import { decryptFolderParallel, createDecryptPool, resolveUnpakWorkerFile, resolveRepakWorkerFile } from './decrypt-pool'
 import type { DecryptFolderOptions } from './decrypt-pool'
 import { errorMessage, type ProgressCallback } from './progress'
 import { runUnpakWithProgress } from './unpak-pool'
-import { countFilesInPak } from '../core/unpak'
-import { addEntriesToPak, removeEntriesFromPak, type PakAddEntry } from '../core/repak'
+import { countPakOffThread } from './pak-scan-pool'
 import { PAK_DIR, REPAKED_DIR, UNPAKED_DIR, pakRelPathFromFiles, unpakedFolderForPak, unpakedSingleFolderForPak } from './paths'
 import { mapPool } from './parallel'
 import { cpuThreadsForWork, innerConcurrency, workerResourceLimits } from './threads'
@@ -159,6 +159,66 @@ function createRepakPool(): Piscina<RepakTaskInput, RepakTaskResult> {
 	})
 }
 
+/** One RePAK worker task (create/add/remove). Disk work stays off the main thread. */
+async function runRepakTask(
+	input: RepakTaskInput,
+	signal: AbortSignal | undefined,
+	onFile?: (info: { current?: number; total?: number; percent?: number; bytesDelta?: number; fileName?: string; output?: string }) => void,
+): Promise<RepakTaskResult> {
+	const pool = createRepakPool()
+	const channel = new MessageChannel()
+	const { port1, port2 } = channel
+	const abortListener = (): void => {
+		try {
+			port1.postMessage({ type: 'abort' })
+		} catch {
+			// ignore
+		}
+	}
+	const onMessage = (msg: unknown): void => {
+		if (!msg || typeof msg !== 'object') return
+		const m = msg as Record<string, unknown>
+		if (m['type'] !== 'progress') return
+		onFile?.({
+			current: typeof m['current'] === 'number' ? m['current'] : undefined,
+			total: typeof m['total'] === 'number' ? m['total'] : undefined,
+			percent: typeof m['percent'] === 'number' ? m['percent'] : undefined,
+			bytesDelta: typeof m['bytesDelta'] === 'number' ? m['bytesDelta'] : undefined,
+			fileName: typeof m['fileName'] === 'string' ? m['fileName'] : undefined,
+			output: typeof m['output'] === 'string' ? m['output'] : undefined,
+		})
+	}
+	try {
+		port1.on('message', onMessage)
+	} catch {
+		// ignore
+	}
+	if (signal) {
+		if (signal.aborted) abortListener()
+		else signal.addEventListener('abort', abortListener, { once: true })
+	}
+	try {
+		return await pool.run(
+			{ ...input, port: port2 },
+			{ transferList: [port2], signal: signal ?? undefined } as unknown as Parameters<typeof pool.run>[1],
+		)
+	} finally {
+		if (signal) {
+			try {
+				signal.removeEventListener('abort', abortListener)
+			} catch {
+				// ignore
+			}
+		}
+		try {
+			port1.close()
+		} catch {
+			// ignore
+		}
+		await pool.destroy()
+	}
+}
+
 interface UnpackOneResult {
 	ok: boolean;
 	entry?: PakPackageSuccess;
@@ -217,7 +277,7 @@ async function unpackOne(
 		// extract uses the selected entries count as the total.
 		const fileTotal = selectedEntries
 			? selectedEntries.length
-			: await countFilesInPak(pkg, () => signal?.aborted ?? false)
+			: await countPakOffThread(pkg, signal)
 		onProgress?.({ stage: 'unpack-start', packageName, packageIndex, packageTotal, file: pkg, total: fileTotal })
 		// 100% assíncrono: exclusivamente em workers Piscina; sem fallback síncrono no main.
 		await runUnpakPoolWithProgress(
@@ -686,88 +746,6 @@ function isInsideDir(base: string, candidate: string): boolean {
 	return resolved === resolvedBase || isSubPath(resolvedBase, resolved)
 }
 
-function sanitizeEntryName(name: string): string | null {
-	const normalized = name.replace(/\\/g, '/').replace(/^\/+/, '')
-	if (normalized.length === 0) return null
-	const segments = normalized.split('/')
-	for (const segment of segments) {
-		if (segment === '' || segment === '.' || segment === '..') return null
-		if (/^[a-zA-Z]:/.test(segment)) return null
-	}
-	return segments.join('/')
-}
-
-async function collectAddEntries(sourcePaths: string[], targetFolder?: string): Promise<PakAddEntry[]> {
-	const entries: PakAddEntry[] = []
-	const seen = new Set<string>()
-	function push(entry: PakAddEntry): void {
-		const key = entry.name.replace(/\\/g, '/').toLowerCase()
-		if (seen.has(key)) return
-		seen.add(key)
-		entries.push(entry)
-	}
-	const target = targetFolder ? sanitizeEntryName(targetFolder.replace(/^\/+|\/+$/g, '')) : null
-	if (target) {
-		const parts = target.split('/')
-		let acc = ''
-		for (const part of parts) {
-			acc = acc ? `${acc}/${part}` : part
-			push({ name: `${acc}/`, absolutePath: '', isDirectory: true, mtime: new Date() })
-		}
-	}
-	const prefix = target ? `${target}/` : ''
-	async function walk(dir: string, currentPrefix: string, signal?: AbortSignal): Promise<void> {
-		if (signal?.aborted) throw new Error('Operation canceled')
-		let dirents: import('fs').Dirent[]
-		try {
-			dirents = await fsp.readdir(dir, { withFileTypes: true })
-		} catch {
-			return
-		}
-		for (const dirent of dirents) {
-			if (dirent.name === '.pak-metadata.json' || dirent.name.startsWith('._tmp_repack')) continue
-			const full = path.join(dir, dirent.name)
-			const rel = currentPrefix ? `${currentPrefix}/${dirent.name}` : dirent.name
-			const name = sanitizeEntryName(rel)
-			if (!name) continue
-			let stat
-			try {
-				stat = await fsp.stat(full)
-			} catch {
-				continue
-			}
-			if (stat.isDirectory()) {
-				push({ name: `${name}/`, absolutePath: full, isDirectory: true, mtime: stat.mtime })
-				await walk(full, name, signal)
-			} else if (stat.isFile()) {
-				const lower = dirent.name.toLowerCase()
-				if (lower.endsWith('.db') || lower.endsWith('.pak')) continue
-				push({ name, absolutePath: full, isDirectory: false, mtime: stat.mtime })
-			}
-		}
-	}
-	for (const source of sourcePaths) {
-		let stat
-		try {
-			stat = await fsp.stat(source)
-		} catch {
-			continue
-		}
-		const base = path.basename(source)
-		if (stat.isDirectory()) {
-			const rootName = sanitizeEntryName(`${prefix}${base}`)
-			if (!rootName) continue
-			push({ name: `${rootName}/`, absolutePath: source, isDirectory: true, mtime: stat.mtime })
-			await walk(source, rootName)
-		} else if (stat.isFile()) {
-			const name = sanitizeEntryName(`${prefix}${base}`)
-			if (!name) continue
-			push({ name, absolutePath: source, isDirectory: false, mtime: stat.mtime })
-		}
-	}
-	return entries
-}
-
 export interface AddFilesToPakOptions extends PakServiceOptions {
 	overwrite?: boolean;
 	targetFolder?: string;
@@ -791,19 +769,20 @@ export async function addFilesToRepakedPak(
 		results.failed.push({ packageName, packagePath: pakPath, error: `PAK not found: ${pakPath}` } as PakFailure)
 		return results
 	}
-	const entries = await collectAddEntries(sourcePaths, options.targetFolder)
-	if (entries.length === 0) {
-		results.failed.push({ packageName, packagePath: pakPath, error: 'No files to add' } as PakFailure)
-		return results
-	}
-
 	const onProgress = options.onProgress
 	onProgress?.({ stage: 'repak-start', packageName, packageIndex: 1, packageTotal: 1, percent: 0, file: pakPath })
 
 	try {
-		const result = await addEntriesToPak(pakPath, entries, {
-			overwrite: options.overwrite === true,
-			onProgress: (info) => {
+		const result = await runRepakTask(
+			{
+				op: 'add',
+				pakPath,
+				sourcePaths,
+				targetFolder: options.targetFolder,
+				overwrite: options.overwrite === true,
+			},
+			options.signal,
+			(info) => {
 				onProgress?.(
 					{
 						stage: 'repak',
@@ -814,15 +793,18 @@ export async function addFilesToRepakedPak(
 						total: info.total,
 						percent: info.percent,
 						bytesDelta: info.bytesDelta,
-						fileName: info.fileName ?? undefined,
+						fileName: info.fileName,
 						file: pakPath,
 						output: info.output,
 					},
 					{ current: info.current, total: info.total },
 				)
 			},
-			shouldAbort: () => options.signal?.aborted ?? false,
-		})
+		)
+		if ((result.conflicts?.length ?? 0) === 0 && (result.total ?? 0) === 0 && (result.added ?? 0) === 0) {
+			results.failed.push({ packageName, packagePath: pakPath, error: 'No files to add' } as PakFailure)
+			return results
+		}
 		onProgress?.({ stage: 'repak-done', packageName, packageIndex: 1, packageTotal: 1, percent: 100, file: pakPath })
 		results.success.push({
 			packageName,
@@ -871,8 +853,10 @@ export async function deleteRepakedPakEntries(
 	const onProgress = options.onProgress
 	onProgress?.({ stage: 'repak-start', packageName, packageIndex: 1, packageTotal: 1, percent: 0, file: pakPath })
 	try {
-		const result = await removeEntriesFromPak(pakPath, normalized, {
-			onProgress: (info) => {
+		const result = await runRepakTask(
+			{ op: 'remove', pakPath, names: normalized },
+			options.signal,
+			(info) => {
 				onProgress?.(
 					{
 						stage: 'repak',
@@ -886,8 +870,7 @@ export async function deleteRepakedPakEntries(
 					{ current: info.current, total: info.total },
 				)
 			},
-			shouldAbort: () => options.signal?.aborted ?? false,
-		})
+		)
 		onProgress?.({ stage: 'repak-done', packageName, packageIndex: 1, packageTotal: 1, percent: 100, file: pakPath })
 		results.success.push({ packageName, packagePath: pakPath, removed: result.removed })
 	} catch (error) {

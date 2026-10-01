@@ -9,7 +9,7 @@ import { fileURLToPath } from 'url'
 import { build } from 'vite'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const workers = ['decrypt-task', 'unpak-task', 'repak-task', 'count-task']
+const workers = ['decrypt-task', 'unpak-task', 'repak-task', 'count-task', 'scan-folder-task', 'pak-scan-task']
 const externals = [...builtinModules, ...builtinModules.map((m) => `node:${m}`)]
 
 for (const name of workers) {

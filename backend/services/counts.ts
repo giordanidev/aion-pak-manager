@@ -1,4 +1,5 @@
-import { existsSync, readdirSync, statSync } from 'fs'
+import { existsSync, statSync } from 'fs'
+import { promises as fsp } from 'fs'
 import path from 'path'
 import { Piscina } from 'piscina'
 import type { EntryCountCacheEntry } from '../../shared/api-types'
@@ -102,13 +103,19 @@ async function runCountTask(target: string, mode: 'folder' | 'pak'): Promise<Cou
 	}
 }
 
-function measureFolderInProcess(root: string): CountTaskResult {
+function pumpMain(): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, 0))
+}
+
+/** Async walk used only when the count worker is unavailable. Yields so the window stays responsive. */
+async function measureFolderInProcess(root: string): Promise<CountTaskResult> {
 	let count = 0
 	let size = 0
-	function walk(dir: string): void {
+	let scanned = 0
+	async function walk(dir: string): Promise<void> {
 		let names: string[]
 		try {
-			names = readdirSync(dir)
+			names = await fsp.readdir(dir)
 		} catch {
 			return
 		}
@@ -117,20 +124,22 @@ function measureFolderInProcess(root: string): CountTaskResult {
 			if (name.startsWith('._tmp_repack_')) continue
 			if (name.toLowerCase().endsWith('.db')) continue
 			const full = path.join(dir, name)
-			let stat: ReturnType<typeof statSync>
+			let stat: Awaited<ReturnType<typeof fsp.stat>>
 			try {
-				stat = statSync(full)
+				stat = await fsp.stat(full)
 			} catch {
 				continue
 			}
-			if (stat.isDirectory()) walk(full)
+			scanned += 1
+			if (stat.isDirectory()) await walk(full)
 			else if (stat.isFile()) {
 				count += 1
 				size += stat.size
 			}
+			if ((scanned & 31) === 0) await pumpMain()
 		}
 	}
-	walk(root)
+	await walk(root)
 	return { count, size }
 }
 
@@ -141,30 +150,33 @@ function measureFolderInProcess(root: string): CountTaskResult {
 async function measureFolderParallel(root: string): Promise<CountTaskResult> {
 	let names: string[]
 	try {
-		names = readdirSync(root)
+		names = await fsp.readdir(root)
 	} catch {
 		return { count: 0, size: 0 }
 	}
 
 	let count = 0
 	let size = 0
+	let scanned = 0
 	const subdirs: string[] = []
 	for (const name of names) {
 		if (name === '.pak-metadata.json' || name === '._tmp_repack') continue
 		if (name.startsWith('._tmp_repack_')) continue
 		if (name.toLowerCase().endsWith('.db')) continue
 		const full = path.join(root, name)
-		let stat: ReturnType<typeof statSync>
+		let stat: Awaited<ReturnType<typeof fsp.stat>>
 		try {
-			stat = statSync(full)
+			stat = await fsp.stat(full)
 		} catch {
 			continue
 		}
+		scanned += 1
 		if (stat.isDirectory()) subdirs.push(full)
 		else if (stat.isFile()) {
 			count += 1
 			size += stat.size
 		}
+		if ((scanned & 31) === 0) await pumpMain()
 	}
 
 	if (subdirs.length === 0) return { count, size }

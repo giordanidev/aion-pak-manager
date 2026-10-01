@@ -1,4 +1,4 @@
-import { closeSync, mkdirSync, openSync, readSync, statSync, writeFileSync } from 'fs';
+import { closeSync, mkdirSync, openSync, read as readCb, readSync, statSync, writeFileSync } from 'fs';
 import path from 'path';
 import { inflateRawSync, inflateSync } from 'zlib';
 import { TABLE1, TABLE2, crc32, crc32Unsigned } from '../parse/pak-codec';
@@ -332,7 +332,7 @@ export async function scanPakEntries(inputPath: string, shouldAbort: ShouldAbort
 
 		while (offset < fileSize) {
 			if ((iter++ & 63) === 0) {
-				await new Promise((resolve) => setImmediate(resolve));
+				await new Promise((resolve) => setTimeout(resolve, 0));
 			}
 			if (shouldAbort()) throw new Error('Operation canceled');
 			const sigBuf = Buffer.alloc(4);
@@ -354,8 +354,7 @@ export async function scanPakEntries(inputPath: string, shouldAbort: ShouldAbort
 				readSync(fd, fnameBuf, 0, fileNameLength, offset);
 				offset += fileNameLength + extraFieldLength;
 				if (version === null && uncompressedSize > 0) {
-					const cdata = Buffer.alloc(compressedSize);
-					readSync(fd, cdata, 0, compressedSize, offset);
+					const cdata = await readRange(fd, compressedSize, offset, shouldAbort);
 					const detected = detectVersion(Buffer.from(cdata), uncompressedSize, crc, compMethod);
 					if (detected === null) throw new Error('Unknown AION version');
 					version = detected;
@@ -394,6 +393,27 @@ function normalizeEntryFilter(entryFilter?: ReadonlySet<string> | string[] | nul
 		normalized.add(String(value).replace(/\\/g, '/'));
 	}
 	return normalized;
+}
+
+/** Chunked async read so a large first entry does not freeze the window during version detection. */
+async function readRange(fd: number, length: number, position: number, shouldAbort: ShouldAbort): Promise<Buffer> {
+	const buffer = Buffer.alloc(length);
+	let offset = 0;
+	while (offset < length) {
+		if (shouldAbort()) throw new Error('Operation canceled');
+		const chunk = Math.min(1024 * 1024, length - offset);
+		const bytesRead = await new Promise<number>((resolve, reject) => {
+			readCb(fd, buffer, offset, chunk, position + offset, (err, n) => {
+				if (err) reject(err);
+				else resolve(n);
+			});
+		});
+		if (bytesRead <= 0) {
+			throw new Error(`Unexpected end of file at offset ${position + offset}`);
+		}
+		offset += bytesRead;
+	}
+	return buffer;
 }
 
 function readAt(fd: number, length: number, position: number): Buffer {

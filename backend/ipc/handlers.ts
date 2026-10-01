@@ -1,6 +1,6 @@
 import { BrowserWindow, dialog, ipcMain, shell } from 'electron'
-import { existsSync, mkdirSync, rmSync, unlinkSync } from 'fs'
-import { readdir, readFile, stat } from 'fs/promises'
+import { existsSync, mkdirSync } from 'fs'
+import { readFile, rm, stat, unlink } from 'fs/promises'
 import path from 'path'
 import {
 	PAK_DIR,
@@ -19,7 +19,7 @@ import {
 	clearEntryCountCache,
 	removeEntryCountCacheEntry,
 } from '../services/counts'
-import { listFilesInPak } from '../core/unpak'
+import { listFolderOffThread, listPakOffThread } from '../services/pak-scan-pool'
 import {
 	addFilesToRepakedPak,
 	decryptPackages,
@@ -97,30 +97,6 @@ function requestConflict(
 
 function toCloneable<T>(value: T): T {
 	return JSON.parse(JSON.stringify(value)) as T
-}
-
-/** Recursive file listing of a folder as posix-relative paths (structure view). */
-async function listFolderFiles(root: string): Promise<string[]> {
-	const results: string[] = []
-	async function walk(dir: string, rel: string): Promise<void> {
-		let entries: import('fs').Dirent[]
-		try {
-			entries = await readdir(dir, { withFileTypes: true })
-		} catch {
-			return
-		}
-		for (const entry of entries) {
-			if (entry.name === '.pak-metadata.json' || entry.name === '._tmp_repack') continue
-			const relPath = rel ? `${rel}/${entry.name}` : entry.name
-			if (entry.isDirectory()) {
-				await walk(path.join(dir, entry.name), relPath)
-			} else if (entry.isFile()) {
-				results.push(relPath)
-			}
-		}
-	}
-	await walk(root, '')
-	return results
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -371,18 +347,18 @@ export function registerIpcHandlers(getMainWindow: GetMainWindow): void {
 			const entry = await stat(resolved).catch(() => null)
 			if (!entry) throw new Error('Path not found')
 			if (entry.isDirectory()) {
-				rmSync(resolved, { recursive: true, force: true })
+				await rm(resolved, { recursive: true, force: true })
 				// Legacy sibling aggregate DB next to an UnPAKED folder.
 				const legacyDb = `${resolved}.db`
 				if (existsSync(legacyDb)) {
 					try {
-						unlinkSync(legacyDb)
+						await unlink(legacyDb)
 					} catch {
 						// ignore sibling db cleanup failures
 					}
 				}
 			} else {
-				unlinkSync(resolved)
+				await unlink(resolved)
 			}
 			removeEntryCountCacheEntry(resolved)
 			return { success: true }
@@ -405,9 +381,9 @@ export function registerIpcHandlers(getMainWindow: GetMainWindow): void {
 			}
 			const statEntry = await stat(resolved).catch(() => null)
 			if (statEntry?.isDirectory()) {
-				return { success: true, files: await listFolderFiles(resolved) }
+				return { success: true, files: await listFolderOffThread(resolved) }
 			}
-			return { success: true, files: await listFilesInPak(resolved) }
+			return { success: true, files: await listPakOffThread(resolved) }
 		} catch (error) {
 			return { success: false, error: errorMessage(error) }
 		}

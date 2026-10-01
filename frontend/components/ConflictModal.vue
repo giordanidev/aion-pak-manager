@@ -28,16 +28,16 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
     aria-modal="true"
   >
     <div
-      class="flex h-[80vh] w-[90vw] max-w-[90vw] min-h-0 flex-col rounded-xl border border-border bg-card shadow-[0_8px_40px_rgba(0,0,0,0.5)]"
+      class="w-full max-w-sm rounded-xl border border-border bg-card px-5 py-4 shadow-[0_8px_30px_rgba(0,0,0,0.45)]"
     >
-      <div class="flex flex-none items-center justify-between gap-3 border-b border-border px-5 py-4">
+      <div class="mb-3 flex items-start justify-between gap-3">
         <h3 class="m-0 text-bright">{{ t('pak.conflictTitle') }}</h3>
-        <span class="text-xs text-dim tabular-nums">
+        <span class="flex-none text-xs text-dim tabular-nums">
           {{ t('pak.conflictCounter', { i: request.conflictIndex, total: request.conflictTotal }) }}
         </span>
       </div>
 
-      <div class="flex flex-col gap-4 px-5 py-4">
+      <div class="flex flex-col gap-3">
         <p class="m-0 break-words text-sm text-text">
           {{ t('pak.conflictBody', { name: request.packageName, dir: dirLabel('unpaked') }) }}
         </p>

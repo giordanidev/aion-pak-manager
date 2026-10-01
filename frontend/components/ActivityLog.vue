@@ -1,11 +1,30 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { useAppState } from '../composables/useAppState'
+import { useAppState, type LogEntry, type LogParam } from '../composables/useAppState'
 import { getShowFileNames, setShowFileNames } from '../composables/useElectron'
 
 const { t } = useI18n()
 const { state } = useAppState()
+
+function resolveParams(params?: Record<string, LogParam>): Record<string, unknown> {
+  if (!params) return {}
+  const out: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(params)) {
+    if (value && typeof value === 'object' && 'i18n' in value) {
+      out[key] = t(value.i18n, resolveParams(value.params))
+    } else if (value !== undefined) {
+      out[key] = value
+    }
+  }
+  return out
+}
+
+function formatLog(entry: LogEntry): string {
+  return entry.parts
+    .map((part) => (part.key ? String(t(part.key, resolveParams(part.params))) : (part.text ?? '')))
+    .join('')
+}
 const logEl = ref<HTMLElement | null>(null)
 const modalLogEl = ref<HTMLElement | null>(null)
 const logModalOpen = ref(false)
@@ -99,7 +118,7 @@ function onModalKeydown(event: KeyboardEvent): void {
       class="min-h-0 flex-1 overflow-x-hidden overflow-y-auto rounded-xl border border-border bg-deepest p-4 font-mono text-[13px]"
       ref="logEl"
     >
-      <p v-for="entry in state.logEntries" :key="entry.id" class="my-1 leading-[1.4]" :class="logClass(entry.type)">{{ entry.message }}</p>
+      <p v-for="entry in state.logEntries" :key="entry.id" class="my-1 leading-[1.4]" :class="logClass(entry.type)">{{ formatLog(entry) }}</p>
     </div>
 
     <Teleport to="body">
@@ -122,7 +141,7 @@ function onModalKeydown(event: KeyboardEvent): void {
               class="m-4 min-h-0 flex-1 overflow-auto rounded-xl border border-border bg-deepest p-4 font-mono text-[13px]"
               ref="modalLogEl"
             >
-              <p v-for="entry in state.logEntries" :key="entry.id" class="my-1 leading-[1.4]" :class="logClass(entry.type)">{{ entry.message }}</p>
+              <p v-for="entry in state.logEntries" :key="entry.id" class="my-1 leading-[1.4]" :class="logClass(entry.type)">{{ formatLog(entry) }}</p>
             </div>
           </div>
         </div>

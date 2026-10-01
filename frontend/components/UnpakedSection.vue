@@ -10,7 +10,7 @@ import ConfirmModal from './ConfirmModal.vue'
 
 const { t } = useI18n()
 const electron = useElectron()
-const { state, log, clearLog, setProgress, setSummary, setActionRunning, refreshLists, setCustomDir, dirLabel } = useAppState()
+const { state, logI18n, clearLog, setProgress, setSummary, setActionRunning, refreshLists, setCustomDir, dirLabel } = useAppState()
 
 const selectedFolderPaths = ref<string[]>([])
 const activeTab = ref<'unpaked' | 'repaked'>('unpaked')
@@ -91,38 +91,38 @@ interface FailureEntry {
 async function decryptSelectedUnpaked(): Promise<void> {
   const selected = Array.from(selectedFolderPaths.value)
   if (selected.length === 0) {
-    log(t('unpaked.selectFirstDecrypt', { dir: dirLabel('unpaked') }), 'error')
+    logI18n('unpaked.selectFirstDecrypt', { dir: dirLabel('unpaked') }, 'error')
     return
   }
   setActionRunning(true)
   clearLog()
   setSummary(t('unpaked.decryptingN', { n: selected.length, dir: dirLabel('unpaked') }), 'info')
-  log(t('unpaked.decryptingNLog', { n: selected.length, dir: dirLabel('unpaked') }))
+  logI18n('unpaked.decryptingNLog', { n: selected.length, dir: dirLabel('unpaked') })
   try {
     const result = await electron.decryptUnpaked(selected, { showFileProgress: getShowFileNames() })
     if (result.success) {
       const successCount = result.results?.success.length ?? 0
       const failedCount = result.results?.failed.length ?? 0
-      log(t('unpaked.decryptDone', { ok: successCount, fail: failedCount }), 'success')
+      logI18n('unpaked.decryptDone', { ok: successCount, fail: failedCount }, 'success')
       if (failedCount > 0) {
         result.results?.failed.forEach((fail) => {
           const entry = fail as FailureEntry
-          log(t('unpaked.decryptFailItem', { path: entry.folderPath, error: entry.error }), 'error')
+          logI18n('unpaked.decryptFailItem', { path: entry.folderPath, error: entry.error }, 'error')
         })
         setSummary(t('unpaked.decryptFailSummary', { ok: successCount, fail: failedCount }), 'error')
       } else {
         setSummary(t('unpaked.decryptAllOk', { n: successCount }), 'success')
       }
     } else {
-      log(t('pak.actionFailedOp', { error: result.error }), 'error')
+      logI18n('pak.actionFailedOp', { error: result.error }, 'error')
       setSummary(t('unpaked.decryptFailTitle'), 'error')
     }
   } catch (err) {
-    log(t('pak.unexpectedLog', { error: err instanceof Error ? err.message : String(err) }), 'error')
+    logI18n('pak.unexpectedLog', { error: err instanceof Error ? err.message : String(err) }, 'error')
     setSummary(t('pak.unexpected'), 'error')
   } finally {
     setActionRunning(false)
-    setProgress(0, t('progress.idle'))
+    setProgress(0, 'progress.idle')
     await refreshLists()
   }
 }
@@ -130,13 +130,13 @@ async function decryptSelectedUnpaked(): Promise<void> {
 async function repackSelectedUnpaked(): Promise<void> {
   const selected = Array.from(selectedFolderPaths.value)
   if (selected.length === 0) {
-    log(t('unpaked.selectFirstRepak', { dir: dirLabel('unpaked') }), 'error')
+    logI18n('unpaked.selectFirstRepak', { dir: dirLabel('unpaked') }, 'error')
     return
   }
   setActionRunning(true)
   clearLog()
   setSummary(t('unpaked.repakingN', { n: selected.length, dir: dirLabel('unpaked') }), 'info')
-  log(t('unpaked.repakingNLog', { n: selected.length, dir: dirLabel('unpaked') }))
+  logI18n('unpaked.repakingNLog', { n: selected.length, dir: dirLabel('unpaked') })
   try {
     const result = await electron.repackUnpaked({
       selectedFolderPaths: selected,
@@ -147,26 +147,26 @@ async function repackSelectedUnpaked(): Promise<void> {
     if (result.success) {
       const successCount = result.results?.success.length ?? 0
       const failedCount = result.results?.failed.length ?? 0
-      log(t('unpaked.repakDone', { ok: successCount, fail: failedCount }), 'success')
+      logI18n('unpaked.repakDone', { ok: successCount, fail: failedCount }, 'success')
       if (failedCount > 0) {
         result.results?.failed.forEach((fail) => {
           const entry = fail as FailureEntry
-          log(t('unpaked.repakFailItem', { folder: entry.folderName || '', pak: entry.pak || '', error: entry.error }), 'error')
+          logI18n('unpaked.repakFailItem', { folder: entry.folderName || '', pak: entry.pak || '', error: entry.error }, 'error')
         })
         setSummary(t('pak.partialSummary', { ok: successCount, fail: failedCount }), 'error')
       } else {
         setSummary(t('unpaked.repakAllOk', { n: successCount }), 'success')
       }
     } else {
-      log(t('pak.actionFailedOp', { error: result.error }), 'error')
+      logI18n('pak.actionFailedOp', { error: result.error }, 'error')
       setSummary(t('unpaked.repakFailTitle'), 'error')
     }
   } catch (err) {
-    log(t('pak.unexpectedLog', { error: err instanceof Error ? err.message : String(err) }), 'error')
+    logI18n('pak.unexpectedLog', { error: err instanceof Error ? err.message : String(err) }, 'error')
     setSummary(t('pak.unexpected'), 'error')
   } finally {
     setActionRunning(false)
-    setProgress(0, t('progress.idle'))
+    setProgress(0, 'progress.idle')
     await refreshLists()
   }
 }
@@ -176,10 +176,10 @@ async function openUnpakedFolder(): Promise<void> {
     const custom = state.customDirs.unpaked
     const result = custom ? await electron.openFolder(custom) : await electron.openUnpakedFolder()
     if (!result.success) {
-      log(t('unpaked.openRepaksFail', { error: result.error ?? 'error' }), 'error')
+      logI18n('unpaked.openRepaksFail', { error: result.error ?? 'error' }, 'error')
     }
   } catch (err) {
-    log(t('unpaked.openRepaksFail', { error: err instanceof Error ? err.message : String(err) }), 'error')
+    logI18n('unpaked.openRepaksFail', { error: err instanceof Error ? err.message : String(err) }, 'error')
   }
 }
 
@@ -188,10 +188,10 @@ async function openRepakedFolder(): Promise<void> {
     const custom = state.customDirs.repaked
     const result = custom ? await electron.openFolder(custom) : await electron.openRepakedFolder()
     if (!result.success) {
-      log(t('unpaked.openRepaksFail', { error: result.error ?? 'error' }), 'error')
+      logI18n('unpaked.openRepaksFail', { error: result.error ?? 'error' }, 'error')
     }
   } catch (err) {
-    log(t('unpaked.openRepaksFail', { error: err instanceof Error ? err.message : String(err) }), 'error')
+    logI18n('unpaked.openRepaksFail', { error: err instanceof Error ? err.message : String(err) }, 'error')
   }
 }
 
@@ -207,7 +207,7 @@ async function changeActiveFolder(): Promise<void> {
     setCustomDir(activeDirKey.value, result.folderPath)
     await refreshLists()
   } catch (err) {
-    log(t('unpaked.openRepaksFail', { error: err instanceof Error ? err.message : String(err) }), 'error')
+    logI18n('unpaked.openRepaksFail', { error: err instanceof Error ? err.message : String(err) }, 'error')
   }
 }
 

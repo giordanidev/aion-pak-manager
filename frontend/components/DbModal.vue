@@ -4,13 +4,14 @@ import { useI18n } from 'vue-i18n'
 import type { PakDatabaseInfo } from '../../shared/api-types'
 import { getShowFileNames, useElectron } from '../composables/useElectron'
 import { useAppState } from '../composables/useAppState'
+import { useVirtualWindow, VIRTUAL_ROW_HEIGHT } from '../composables/useVirtualWindow'
 
 const props = defineProps<{ open: boolean; initialDbPath?: string | null; folderPath?: string | null }>()
 const emit = defineEmits<{ (e: 'close'): void; (e: 'done'): void }>()
 
 const { t } = useI18n()
 const electron = useElectron()
-const { state, log, clearLog, setProgress, setSummary, setActionRunning, dirLabel } = useAppState()
+const { state, logI18n, clearLog, setProgress, setSummary, setActionRunning, dirLabel } = useAppState()
 
 const loading = ref(false)
 const building = ref(false)
@@ -18,7 +19,10 @@ const dbInfo = ref<PakDatabaseInfo | null>(null)
 const error = ref('')
 const requestId = ref(0)
 const selected = ref<string[]>([])
+const searchInput = ref('')
 const searchQuery = ref('')
+const searchBusy = ref(false)
+let searchTimer: ReturnType<typeof setTimeout> | undefined
 const expandingKey = ref<string | null>(null)
 
 type NodeKind = 'dir' | 'file'
@@ -73,11 +77,18 @@ function splitRel(value: string): string[] {
 }
 
 const searchActive = computed(() => searchQuery.value.trim().length > 0)
+const searchPending = computed(() => searchInput.value.trim() !== searchQuery.value.trim())
 const isSelected = (file: string): boolean => selected.value.includes(file)
 
-const visibleRows = computed<VisibleRow[]>(() => {
+function collectMatches(node: TreeNode, query: string, out: TreeNode[]): void {
+  for (const child of node.children.values()) {
+    if (child.name.toLowerCase().includes(query)) out.push(child)
+    else collectMatches(child, query, out)
+  }
+}
+
+function buildVisibleRows(query: string): VisibleRow[] {
   const rows: VisibleRow[] = []
-  const query = searchQuery.value.trim().toLowerCase()
   function push(node: TreeNode, depth: number): void {
     const expandable = node.children.size > 0
     const isExpanded = expanded.value.has(node.key)
@@ -96,15 +107,8 @@ const visibleRows = computed<VisibleRow[]>(() => {
     }
   }
   if (query) {
-    function collectMatches(node: TreeNode): TreeNode[] {
-      const matches: TreeNode[] = []
-      for (const child of node.children.values()) {
-        if (child.name.toLowerCase().includes(query)) matches.push(child)
-        else matches.push(...collectMatches(child))
-      }
-      return matches
-    }
-    const matches = collectMatches(treeRoot.value)
+    const matches: TreeNode[] = []
+    collectMatches(treeRoot.value, query, matches)
     matches.sort((a, b) => {
       const aDir = a.children.size > 0 || a.kind === 'dir'
       const bDir = b.children.size > 0 || b.kind === 'dir'
@@ -116,6 +120,49 @@ const visibleRows = computed<VisibleRow[]>(() => {
   }
   for (const child of sortChildren(treeRoot.value)) push(child, 0)
   return rows
+}
+
+const visibleRows = ref<VisibleRow[]>([])
+let rowsGen = 0
+watch([searchQuery, treeRoot, expanded], async () => {
+  const id = ++rowsGen
+  const query = searchQuery.value.trim().toLowerCase()
+  if (query) {
+    searchBusy.value = true
+    await new Promise<void>((resolve) => setTimeout(resolve, 0))
+    if (id !== rowsGen) return
+  }
+  visibleRows.value = buildVisibleRows(query)
+  if (id === rowsGen) searchBusy.value = false
+})
+
+watch(searchInput, (value) => {
+  if (searchTimer) clearTimeout(searchTimer)
+  if (!value.trim()) {
+    searchQuery.value = ''
+    return
+  }
+  searchTimer = setTimeout(() => {
+    searchQuery.value = value
+  }, 400)
+})
+
+const leftCount = computed(() => visibleRows.value.length)
+const {
+  start: leftStart,
+  end: leftEnd,
+  totalHeight: leftTotalHeight,
+  onScroll: onLeftScroll,
+  bind: bindLeftScroll,
+} = useVirtualWindow(leftCount)
+const windowedRows = computed(() => {
+  const rows = visibleRows.value
+  const items: { row: VisibleRow; index: number }[] = []
+  for (let i = leftStart.value; i < leftEnd.value; i += 1) {
+    const row = rows[i]
+    if (row) items.push({ row, index: i })
+  }
+  return items
 })
 
 const selectedTree = computed<TreeNode>(() => {
@@ -153,6 +200,24 @@ const selectedRows = computed<SelectedRow[]>(() => {
   }
   visit(selectedTree.value, 0)
   return rows
+})
+
+const selectedCount = computed(() => selectedRows.value.length)
+const {
+  start: selectedStart,
+  end: selectedEnd,
+  totalHeight: selectedTotalHeight,
+  onScroll: onSelectedScroll,
+  bind: bindSelectedScroll,
+} = useVirtualWindow(selectedCount)
+const windowedSelected = computed(() => {
+  const rows = selectedRows.value
+  const items: { row: SelectedRow; index: number }[] = []
+  for (let i = selectedStart.value; i < selectedEnd.value; i += 1) {
+    const row = rows[i]
+    if (row) items.push({ row, index: i })
+  }
+  return items
 })
 
 const rootLabel = computed(() => dbInfo.value?.folderName ?? dbInfo.value?.relPakPath ?? '')
@@ -381,7 +446,7 @@ async function repakSelected(): Promise<void> {
   setActionRunning(true)
   clearLog()
   setSummary(t('db.repakingN', { n: entries.length, paks: pakCount }), 'info')
-  log(t('db.repakingNLog', { n: entries.length }))
+  logI18n('db.repakingNLog', { n: entries.length })
   try {
     const result = await electron.repackUnpakedSelection({
       folderPath,
@@ -391,18 +456,18 @@ async function repakSelected(): Promise<void> {
       unpakedDir: state.customDirs.unpaked || undefined,
     })
     if (result.canceled) {
-      log(t('progress.canceled'), 'warning')
+      logI18n('progress.canceled', undefined, 'warning')
       setSummary(t('progress.canceled'), 'info')
       return
     }
     if (result.success) {
       const successCount = result.results?.success.length ?? 0
       const failedCount = result.results?.failed.length ?? 0
-      log(t('db.repakDone', { ok: successCount, fail: failedCount }), failedCount > 0 ? 'error' : 'success')
+      logI18n('db.repakDone', { ok: successCount, fail: failedCount }, failedCount > 0 ? 'error' : 'success')
       if (failedCount > 0) {
         result.results?.failed.forEach((fail) => {
           const entry = fail as { pak?: string; error?: string }
-          log(t('db.repakFailItem', { pak: entry.pak ?? '', error: entry.error ?? '' }), 'error')
+          logI18n('db.repakFailItem', { pak: entry.pak ?? '', error: entry.error ?? '' }, 'error')
         })
         setSummary(t('db.repakPartial', { ok: successCount, fail: failedCount }), 'error')
       } else {
@@ -410,15 +475,15 @@ async function repakSelected(): Promise<void> {
         succeeded = true
       }
     } else {
-      log(t('pak.actionFailedOp', { error: result.error }), 'error')
+      logI18n('pak.actionFailedOp', { error: result.error }, 'error')
       setSummary(t('db.repakFailTitle'), 'error')
     }
   } catch (err) {
-    log(t('pak.unexpectedLog', { error: err instanceof Error ? err.message : String(err) }), 'error')
+    logI18n('pak.unexpectedLog', { error: err instanceof Error ? err.message : String(err) }, 'error')
     setSummary(t('pak.unexpected'), 'error')
   } finally {
     setActionRunning(false)
-    setProgress(0, t('progress.idle'))
+    setProgress(0, 'progress.idle')
     if (succeeded) emit('done')
   }
 }
@@ -430,7 +495,8 @@ function close(): void {
 
 function onKeydown(event: KeyboardEvent): void {
   if (event.key !== 'Escape') return
-  if (searchQuery.value.length > 0) {
+  if (searchInput.value.length > 0 || searchQuery.value.length > 0) {
+    searchInput.value = ''
     searchQuery.value = ''
     return
   }
@@ -443,6 +509,7 @@ watch(
     if (isOpen) {
       requestId.value += 1
       selected.value = []
+      searchInput.value = ''
       searchQuery.value = ''
       error.value = ''
       dbInfo.value = null
@@ -463,6 +530,7 @@ watch(
 )
 
 onBeforeUnmount(() => {
+  if (searchTimer) clearTimeout(searchTimer)
   window.removeEventListener('keydown', onKeydown)
 })
 </script>
@@ -497,57 +565,67 @@ onBeforeUnmount(() => {
               class="inline-flex h-5 min-w-5 items-center justify-center rounded-full border border-border bg-deepest px-1.5 text-center text-[11px] font-semibold leading-none tabular-nums whitespace-nowrap text-bright"
             >{{ fileTotal }}</span>
           </div>
-          <input
-            v-model="searchQuery"
-            class="min-w-0 flex-none rounded-[10px] border border-border bg-deepest px-2.5 py-1.5 text-xs text-text outline-none focus:border-accent focus:shadow-[0_0_0_3px_rgba(79,143,255,0.15)]"
-            type="text"
-            :placeholder="t('pak.searchPlaceholder')"
-          />
-          <div class="flex min-h-0 flex-1 flex-col overflow-x-hidden overflow-y-auto rounded-lg border border-border bg-deepest p-1 font-mono text-xs">
-            <div v-if="loading || building" class="flex flex-1 items-center justify-center gap-2 text-[13px] text-dim">
+          <div class="relative min-w-0 flex-none">
+            <input
+              v-model="searchInput"
+              class="w-full min-w-0 rounded-[10px] border border-border bg-deepest py-1.5 pl-2.5 pr-8 text-xs text-text outline-none focus:border-accent focus:shadow-[0_0_0_3px_rgba(79,143,255,0.15)]"
+              type="text"
+              :placeholder="t('pak.searchPlaceholder')"
+            />
+            <span
+              v-if="searchPending || searchBusy"
+              class="pointer-events-none absolute right-2 top-1/2 inline-block h-3.5 w-3.5 -translate-y-1/2 animate-spin rounded-full border-2 border-white/35 border-t-white"
+            ></span>
+          </div>
+          <div
+            :ref="bindLeftScroll"
+            class="relative min-h-0 flex-1 overflow-x-hidden overflow-y-auto rounded-lg border border-border bg-deepest font-mono text-xs"
+            @scroll="onLeftScroll"
+          >
+            <div v-if="loading || building" class="flex h-full items-center justify-center gap-2 text-[13px] text-dim">
               <span class="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/35 border-t-white"></span>{{ t('db.loading') }}
             </div>
-            <div v-else-if="error" class="flex flex-1 items-center justify-center gap-2 text-[13px] text-red">{{ error }}</div>
-            <div v-else-if="searchActive && visibleRows.length === 0" class="flex flex-1 items-center justify-center gap-2 text-[13px] text-dim">{{ t('pak.searchEmpty') }}</div>
-            <div v-else-if="visibleRows.length === 0" class="flex flex-1 items-center justify-center gap-2 text-[13px] text-dim">{{ t('db.emptyStructure') }}</div>
-            <template v-else>
+            <div v-else-if="error" class="flex h-full items-center justify-center gap-2 text-[13px] text-red">{{ error }}</div>
+            <div v-else-if="searchActive && visibleRows.length === 0" class="flex h-full items-center justify-center gap-2 text-[13px] text-dim">{{ t('pak.searchEmpty') }}</div>
+            <div v-else-if="visibleRows.length === 0" class="flex h-full items-center justify-center gap-2 text-[13px] text-dim">{{ t('db.emptyStructure') }}</div>
+            <div v-else class="relative w-full" :style="{ height: `${leftTotalHeight}px` }">
               <div
-                v-for="row in visibleRows"
-                :key="row.key"
-                class="flex min-h-7 cursor-pointer items-center gap-1.5 overflow-hidden whitespace-nowrap rounded px-1.5 py-[3px] hover:bg-hover"
-                :class="{ 'bg-accent/[0.18]': !row.expandable && isSelected(row.key) }"
-                :style="{ paddingLeft: `${4 + row.depth * 14}px` }"
-                @click="onRowClick(row)"
+                v-for="item in windowedRows"
+                :key="item.row.key"
+                class="absolute inset-x-0 flex h-7 cursor-pointer items-center gap-1.5 overflow-hidden whitespace-nowrap px-1.5 hover:bg-hover"
+                :class="{ 'bg-accent/[0.18]': !item.row.expandable && isSelected(item.row.key) }"
+                :style="{ top: `${item.index * VIRTUAL_ROW_HEIGHT}px`, paddingLeft: `${4 + item.row.depth * 14}px` }"
+                @click="onRowClick(item.row)"
               >
                 <button
-                  v-if="row.expandable"
+                  v-if="item.row.expandable"
                   type="button"
                   class="inline-flex h-[18px] w-[18px] min-w-[18px] flex-none items-center justify-center rounded border border-border bg-transparent p-0 text-[15px] font-bold leading-none text-text cursor-pointer transition duration-150 enabled:hover:bg-hover"
                   :title="t('pak.toggleFolderHint')"
                   :disabled="state.actionRunning || expandingKey !== null"
-                  @click.stop="toggleNode(row.key)"
+                  @click.stop="toggleNode(item.row.key)"
                 >
-                  <span v-if="expandingKey === row.key" class="inline-block h-2.5 w-2.5 animate-spin rounded-full border-2 border-white/35 border-t-white"></span>
-                  <template v-else>{{ row.expanded ? '−' : '+' }}</template>
+                  <span v-if="expandingKey === item.row.key" class="inline-block h-2.5 w-2.5 animate-spin rounded-full border-2 border-white/35 border-t-white"></span>
+                  <template v-else>{{ item.row.expanded ? '−' : '+' }}</template>
                 </button>
                 <span v-else class="w-[18px] flex-none"></span>
-                <svg v-if="showAsFolder(row)" class="h-[18px] w-7 flex-none text-accent" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                <svg v-if="showAsFolder(item.row)" class="h-[18px] w-7 flex-none text-accent" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
                   <path d="M1.4 3.6a1.2 1.2 0 0 1 1.2-1.2h3l1.4 1.6h6.4a1.2 1.2 0 0 1 1.2 1.2v6.2a1.2 1.2 0 0 1-1.2 1.2H2.6a1.2 1.2 0 0 1-1.2-1.2z" />
                 </svg>
-                <span v-else class="inline-flex h-[18px] w-7 flex-none items-center justify-center rounded border border-accent/55 bg-accent/[0.16] px-0.5 font-sans text-[7px] font-bold uppercase leading-none tracking-[0.2px] text-accent">{{ fileExt(row.name) }}</span>
-                <span class="min-w-0 flex-1 truncate" :class="row.isDir || row.expandable ? 'text-bright' : 'text-text'" :title="row.key">{{ row.name }}</span>
-                <span v-if="showCount(row)" class="ml-2 min-w-10 flex-none text-right text-[11px] tabular-nums text-dim">{{ row.count }}</span>
+                <span v-else class="inline-flex h-[18px] w-7 flex-none items-center justify-center rounded border border-accent/55 bg-accent/[0.16] px-0.5 font-sans text-[7px] font-bold uppercase leading-none tracking-[0.2px] text-accent">{{ fileExt(item.row.name) }}</span>
+                <span class="min-w-0 flex-1 truncate" :class="item.row.isDir || item.row.expandable ? 'text-bright' : 'text-text'" :title="item.row.key">{{ item.row.name }}</span>
+                <span v-if="showCount(item.row)" class="ml-2 min-w-10 flex-none text-right text-[11px] tabular-nums text-dim">{{ item.row.count }}</span>
                 <button
-                  v-if="row.expandable"
+                  v-if="item.row.expandable"
                   type="button"
                   class="ml-1 inline-flex h-[18px] w-[18px] min-w-[18px] flex-none items-center justify-center rounded border-none bg-transparent p-0 text-[13px] leading-none text-dim cursor-pointer enabled:hover:bg-accent/20 enabled:hover:text-bright"
                   :title="t('pak.addFolderHint')"
                   :disabled="state.actionRunning"
-                  @click.stop="addFolder(row.node)"
+                  @click.stop="addFolder(item.row.node)"
                 >&#8594;</button>
                 <span v-else class="w-[18px] flex-none"></span>
               </div>
-            </template>
+            </div>
           </div>
         </div>
         <div class="flex min-h-0 min-w-0 flex-1 flex-col gap-2">
@@ -555,42 +633,48 @@ onBeforeUnmount(() => {
             <span>{{ t('pak.selectedFiles') }}</span>
             <span class="inline-flex h-5 min-w-5 items-center justify-center rounded-full border border-border bg-deepest px-1.5 text-center text-[11px] font-semibold leading-none tabular-nums whitespace-nowrap text-bright">{{ selected.length }}</span>
           </div>
-          <div class="flex min-h-0 flex-1 flex-col overflow-x-hidden overflow-y-auto rounded-lg border border-border bg-deepest p-1 font-mono text-xs">
-            <div v-if="selected.length === 0" class="flex h-full flex-1 items-center justify-center p-4 text-center font-sans text-[13px] text-dim">{{ t('pak.selectFilesFirst') }}</div>
+          <div
+            :ref="bindSelectedScroll"
+            class="relative min-h-0 flex-1 overflow-x-hidden overflow-y-auto rounded-lg border border-border bg-deepest font-mono text-xs"
+            @scroll="onSelectedScroll"
+          >
+            <div v-if="selected.length === 0" class="flex h-full items-center justify-center p-4 text-center font-sans text-[13px] text-dim">{{ t('pak.selectFilesFirst') }}</div>
+            <div v-else class="relative w-full" :style="{ height: `${selectedTotalHeight}px` }">
             <div
-              v-for="row in selectedRows"
-              :key="row.key"
-              class="flex min-h-7 cursor-pointer items-center gap-1.5 overflow-hidden whitespace-nowrap rounded px-1.5 py-[3px] hover:bg-hover"
-              :style="{ paddingLeft: `${4 + row.depth * 14}px` }"
-              @click="!row.isDir && removeFile(row.key)"
+              v-for="item in windowedSelected"
+              :key="item.row.key"
+              class="absolute inset-x-0 flex h-7 cursor-pointer items-center gap-1.5 overflow-hidden whitespace-nowrap px-1.5 hover:bg-hover"
+              :style="{ top: `${item.index * VIRTUAL_ROW_HEIGHT}px`, paddingLeft: `${4 + item.row.depth * 14}px` }"
+              @click="!item.row.isDir && removeFile(item.row.key)"
             >
               <button
-                v-if="row.isDir"
+                v-if="item.row.isDir"
                 type="button"
                 class="inline-flex h-[18px] w-[18px] min-w-[18px] flex-none items-center justify-center rounded border border-border bg-transparent p-0 text-[15px] font-bold leading-none text-text cursor-pointer transition duration-150 enabled:hover:bg-hover"
                 :title="t('pak.toggleFolderHint')"
                 :disabled="state.actionRunning"
-                @click.stop="toggleSelectedNode(row.key)"
-              >{{ selectedExpanded.has(row.key) ? '−' : '+' }}</button>
+                @click.stop="toggleSelectedNode(item.row.key)"
+              >{{ selectedExpanded.has(item.row.key) ? '−' : '+' }}</button>
               <span v-else class="w-[18px] flex-none"></span>
-              <svg v-if="showAsFolder(row)" class="h-[18px] w-7 flex-none text-accent" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+              <svg v-if="showAsFolder(item.row)" class="h-[18px] w-7 flex-none text-accent" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
                 <path d="M1.4 3.6a1.2 1.2 0 0 1 1.2-1.2h3l1.4 1.6h6.4a1.2 1.2 0 0 1 1.2 1.2v6.2a1.2 1.2 0 0 1-1.2 1.2H2.6a1.2 1.2 0 0 1-1.2-1.2z" />
               </svg>
-              <span v-else class="inline-flex h-[18px] w-7 flex-none items-center justify-center rounded border border-accent/55 bg-accent/[0.16] px-0.5 font-sans text-[7px] font-bold uppercase leading-none tracking-[0.2px] text-accent">{{ fileExt(row.name) }}</span>
+              <span v-else class="inline-flex h-[18px] w-7 flex-none items-center justify-center rounded border border-accent/55 bg-accent/[0.16] px-0.5 font-sans text-[7px] font-bold uppercase leading-none tracking-[0.2px] text-accent">{{ fileExt(item.row.name) }}</span>
               <span
                 class="min-w-0 flex-1 truncate"
-                :class="row.isDir ? 'text-bright' : 'text-text'"
-                :title="row.isDir ? t('pak.toggleFolderHint') : row.key"
-                @click="row.isDir ? toggleSelectedNode(row.key) : removeFile(row.key)"
-              >{{ row.name }}</span>
-              <span v-if="showCount(row)" class="ml-2 min-w-10 flex-none text-right text-[11px] tabular-nums text-dim">{{ row.count }}</span>
+                :class="item.row.isDir ? 'text-bright' : 'text-text'"
+                :title="item.row.isDir ? t('pak.toggleFolderHint') : item.row.key"
+                @click="item.row.isDir ? toggleSelectedNode(item.row.key) : removeFile(item.row.key)"
+              >{{ item.row.name }}</span>
+              <span v-if="showCount(item.row)" class="ml-2 min-w-10 flex-none text-right text-[11px] tabular-nums text-dim">{{ item.row.count }}</span>
               <button
                 type="button"
                 class="ml-1 inline-flex h-[18px] w-[18px] min-w-[18px] flex-none items-center justify-center rounded border-none bg-transparent p-0 text-[14px] leading-none text-dim cursor-pointer enabled:hover:bg-red/[0.18] enabled:hover:text-red"
-                :title="row.isDir ? t('pak.removeFolderHint') : t('pak.removeFileHint')"
+                :title="item.row.isDir ? t('pak.removeFolderHint') : t('pak.removeFileHint')"
                 :disabled="state.actionRunning"
-                @click.stop="row.isDir ? removeFolder(row.node) : removeFile(row.key)"
+                @click.stop="item.row.isDir ? removeFolder(item.row.node) : removeFile(item.row.key)"
               >×</button>
+            </div>
             </div>
           </div>
           <div class="flex flex-none items-center justify-end gap-3">

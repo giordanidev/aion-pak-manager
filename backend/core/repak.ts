@@ -427,6 +427,7 @@ export async function createAionPak(
 	progressCallback?: RepackProgressCallback,
 	shouldAbort: ShouldAbort = () => false,
 	concurrency?: number,
+	rejectEmpty = false,
 ): Promise<void> {
 	const rootFolder = path.resolve(folderPath);
 	if (!existsSync(rootFolder) || !statSync(rootFolder).isDirectory()) {
@@ -438,6 +439,9 @@ export async function createAionPak(
 
 	cancelRequested = false;
 	const entries = collectPackEntries(rootFolder);
+	if (rejectEmpty && !entries.some((entry) => !entry.isDirectory)) {
+		throw new Error('No files to repack');
+	}
 	await writeAionPak(entries, outputPakPath, version, progressCallback, shouldAbort, concurrency);
 	if (progressCallback) {
 		progressCallback({
@@ -448,6 +452,71 @@ export async function createAionPak(
 			output: outputPakPath,
 		});
 	}
+}
+
+function pathInside(root: string, candidate: string): boolean {
+	const base = path.resolve(root);
+	const target = path.resolve(candidate);
+	return target === base || target.startsWith(base.endsWith(path.sep) ? base : base + path.sep);
+}
+
+/**
+ * Pack files already on disk (DB manifest) without copying them to a staging
+ * folder first. Missing paths are skipped. Parent directories are synthesized
+ * so the archive layout matches a folder walk.
+ */
+export async function createAionPakFromFiles(
+	srcRoot: string,
+	relativeFiles: readonly string[],
+	outputPakPath: string,
+	version = 0,
+	progressCallback?: RepackProgressCallback,
+	shouldAbort: ShouldAbort = () => false,
+	concurrency?: number,
+): Promise<number> {
+	const root = path.resolve(srcRoot);
+	cancelRequested = false;
+	const entries: PackEntry[] = [];
+	const dirNames = new Set<string>();
+	for (let i = 0; i < relativeFiles.length; i += 1) {
+		if (isAborted(shouldAbort)) throw new Error('Operation canceled');
+		const rel = String(relativeFiles[i] ?? '').replace(/\\/g, '/').replace(/^\/+/, '');
+		if (rel.length === 0 || rel.endsWith('/') || rel.split('/').includes('..')) continue;
+		const abs = path.resolve(root, ...rel.split('/'));
+		if (!pathInside(root, abs)) continue;
+		let stat: ReturnType<typeof statSync>;
+		try {
+			stat = statSync(abs);
+		} catch {
+			continue;
+		}
+		if (!stat.isFile()) continue;
+		entries.push({ name: rel, absolutePath: abs, isDirectory: false, mtime: stat.mtime });
+		const parts = rel.split('/');
+		parts.pop();
+		let acc = '';
+		for (const part of parts) {
+			acc = acc ? `${acc}/${part}` : part;
+			const dirName = `${acc}/`;
+			if (dirNames.has(dirName)) continue;
+			dirNames.add(dirName);
+			entries.push({ name: dirName, absolutePath: '', isDirectory: true, mtime: stat.mtime });
+		}
+		if ((i & 255) === 0) await new Promise<void>((resolve) => setImmediate(resolve));
+	}
+	const fileCount = entries.reduce((n, entry) => n + (entry.isDirectory ? 0 : 1), 0);
+	if (fileCount === 0) {
+		throw new Error(`No source files found under '${root}'`);
+	}
+	entries.sort((a, b) => {
+		if (a.isDirectory === b.isDirectory) return a.name.localeCompare(b.name);
+		return a.isDirectory ? -1 : 1;
+	});
+	mkdirSync(path.dirname(outputPakPath), { recursive: true });
+	cancelRequested = false;
+	await writeAionPak(entries, outputPakPath, version, progressCallback, shouldAbort, concurrency);
+	progressCallback?.({ stage: 'repak', current: 100, total: 100, percent: 100, output: outputPakPath });
+	return fileCount;
 }
 
 export async function createSimpleZipPak(
@@ -506,6 +575,86 @@ export interface PakAddEntry {
 	absolutePath: string;
 	isDirectory: boolean;
 	mtime: Date;
+}
+
+function sanitizeArchiveName(name: string): string | null {
+	const normalized = name.replace(/\\/g, '/').replace(/^\/+/, '');
+	if (normalized.length === 0) return null;
+	for (const segment of normalized.split('/')) {
+		if (segment === '' || segment === '.' || segment === '..') return null;
+		if (/^[a-zA-Z]:/.test(segment)) return null;
+	}
+	return normalized;
+}
+
+/** Walk dropped files/folders into archive entries. Runs in the RePAK worker. */
+export function collectAddSources(sourcePaths: readonly string[], targetFolder?: string): PakAddEntry[] {
+	const entries: PakAddEntry[] = [];
+	const seen = new Set<string>();
+	const push = (entry: PakAddEntry): void => {
+		const key = entry.name.replace(/\\/g, '/').toLowerCase();
+		if (seen.has(key)) return;
+		seen.add(key);
+		entries.push(entry);
+	};
+	const target = targetFolder ? sanitizeArchiveName(targetFolder.replace(/^\/+|\/+$/g, '')) : null;
+	if (target) {
+		let acc = '';
+		for (const part of target.split('/')) {
+			acc = acc ? `${acc}/${part}` : part;
+			push({ name: `${acc}/`, absolutePath: '', isDirectory: true, mtime: new Date() });
+		}
+	}
+	const prefix = target ? `${target}/` : '';
+	const walk = (dir: string, currentPrefix: string): void => {
+		let names: string[];
+		try {
+			names = readdirSync(dir);
+		} catch {
+			return;
+		}
+		for (const name of names) {
+			if (name === '.pak-metadata.json' || name.startsWith('._tmp_repack')) continue;
+			const full = path.join(dir, name);
+			let stat: ReturnType<typeof statSync>;
+			try {
+				stat = statSync(full);
+			} catch {
+				continue;
+			}
+			const rel = currentPrefix ? `${currentPrefix}/${name}` : name;
+			const archiveName = sanitizeArchiveName(rel);
+			if (!archiveName) continue;
+			if (stat.isDirectory()) {
+				push({ name: `${archiveName}/`, absolutePath: full, isDirectory: true, mtime: stat.mtime });
+				walk(full, archiveName);
+			} else if (stat.isFile()) {
+				const lower = name.toLowerCase();
+				if (lower.endsWith('.db') || lower.endsWith('.pak')) continue;
+				push({ name: archiveName, absolutePath: full, isDirectory: false, mtime: stat.mtime });
+			}
+		}
+	};
+	for (const source of sourcePaths) {
+		let stat: ReturnType<typeof statSync>;
+		try {
+			stat = statSync(source);
+		} catch {
+			continue;
+		}
+		const base = path.basename(source);
+		if (stat.isDirectory()) {
+			const rootName = sanitizeArchiveName(`${prefix}${base}`);
+			if (!rootName) continue;
+			push({ name: `${rootName}/`, absolutePath: source, isDirectory: true, mtime: stat.mtime });
+			walk(source, rootName);
+		} else if (stat.isFile()) {
+			const archiveName = sanitizeArchiveName(`${prefix}${base}`);
+			if (!archiveName) continue;
+			push({ name: archiveName, absolutePath: source, isDirectory: false, mtime: stat.mtime });
+		}
+	}
+	return entries;
 }
 
 export interface PakAddOptions {
@@ -899,7 +1048,9 @@ function writeCompactedPak(
 	const tempPath = path.join(dir, `._tmp_repack_${Date.now()}_${Math.random().toString(16).slice(2)}.pak`);
 	const inFd = openSync(pakPath, 'r');
 	const outFd = openSync(tempPath, 'w');
+	let committed = false;
 	try {
+		try {
 		let offset = 0;
 		let pos = 0;
 		const patchedOffsets = new Map<string, number>();
@@ -962,19 +1113,20 @@ function writeCompactedPak(
 		}
 		const count = central.length - replaceLower.size + newCentrals.length;
 		writeAllAt(outFd, buildEocd(format, count, cdSize, cdStart), offset);
-	} finally {
-		closeSync(outFd);
-		closeSync(inFd);
-	}
-	try {
-		renameSync(tempPath, pakPath);
-	} catch (error) {
-		try {
-			unlinkSync(tempPath);
-		} catch {
-			// ignore cleanup failure
+		} finally {
+			closeSync(outFd);
+			closeSync(inFd);
 		}
-		throw error;
+		renameSync(tempPath, pakPath);
+		committed = true;
+	} finally {
+		if (!committed) {
+			try {
+				unlinkSync(tempPath);
+			} catch {
+				// ignore cleanup failure
+			}
+		}
 	}
 }
 

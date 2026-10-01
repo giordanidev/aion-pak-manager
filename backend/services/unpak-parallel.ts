@@ -1,6 +1,7 @@
 import type { Piscina } from 'piscina'
 import type { ProgressPayload } from '../../shared/api-types'
-import { scanPakEntries, type PakScanResult } from '../core/unpak'
+import type { PakScanResult } from '../core/unpak'
+import { scanPakOffThread } from './pak-scan-pool'
 import { mapPool } from './parallel'
 import type { ProgressCallback } from './progress'
 import { runUnpakWithProgress } from './unpak-pool'
@@ -45,38 +46,39 @@ export async function extractPaksParallel(
 ): Promise<UnpakJobOutcome[]> {
 	const scans = new Map<string, PakScanResult>()
 	const scanErrors = new Map<string, string>()
-	let grandTotal = 0
 	const needScan = jobs.filter((job) => !preScans?.has(job.pakPath))
 	for (const job of jobs) {
 		const cached = preScans?.get(job.pakPath)
-		if (cached) {
-			scans.set(job.pakPath, cached)
-			grandTotal += cached.files.length
-		}
+		if (cached) scans.set(job.pakPath, cached)
 	}
-	for (let i = 0; i < needScan.length; i++) {
-		const job = needScan[i]!
-		if (signal?.aborted) throw new Error('Operation canceled')
-		onProgress?.({
-			stage: 'unpack',
-			packageName: job.packageName,
-			packageIndex: job.packageIndex,
-			packageTotal: job.packageTotal,
-			current: 0,
-			total: 0,
-			percent: Math.round(((i + 0.5) / Math.max(needScan.length, 1)) * 1000) / 10,
-			globalPercent: true,
-			fileName: job.packageName,
-		} as ProgressPayload)
-		try {
-			const scan = await scanPakEntries(job.pakPath, () => signal?.aborted ?? false)
-			scans.set(job.pakPath, scan)
-			grandTotal += scan.files.length
-		} catch (error) {
-			scans.set(job.pakPath, { files: [], version: null })
-			scanErrors.set(job.pakPath, error instanceof Error ? error.message : String(error))
-		}
-	}
+	await mapPool(
+		needScan,
+		Math.max(1, Math.min(threads, Math.max(needScan.length, 1))),
+		async (job) => {
+			if (signal?.aborted) throw new Error('Operation canceled')
+			onProgress?.({
+				stage: 'unpack',
+				packageName: job.packageName,
+				packageIndex: job.packageIndex,
+				packageTotal: job.packageTotal,
+				current: 0,
+				total: 0,
+				percent: 0,
+				globalPercent: true,
+				fileName: job.packageName,
+			} as ProgressPayload)
+			try {
+				const scan = await scanPakOffThread(job.pakPath, signal)
+				scans.set(job.pakPath, scan)
+			} catch (error) {
+				scans.set(job.pakPath, { files: [], version: null })
+				scanErrors.set(job.pakPath, error instanceof Error ? error.message : String(error))
+			}
+		},
+		signal,
+	)
+	let grandTotal = 0
+	for (const job of jobs) grandTotal += scans.get(job.pakPath)?.files.length ?? 0
 	const total = Math.max(grandTotal, 1)
 
 	interface Chunk {

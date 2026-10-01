@@ -3,13 +3,13 @@ import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { ExtractFolderPayload, OperationFailure, PakEntry } from '../../shared/api-types'
 import { getShowFileNames, useElectron } from '../composables/useElectron'
-import { useAppState, basename, truncateMiddle, formatBytes } from '../composables/useAppState'
+import { useAppState, basename, truncateMiddle, formatBytes, type LogPart } from '../composables/useAppState'
 import PakContentsModal from './PakContentsModal.vue'
 import ConfirmModal from './ConfirmModal.vue'
 
 const { t } = useI18n()
 const electron = useElectron()
-const { state, log, clearLog, setProgress, resetProgressBar, setProgressBatch, setSummary, setActionRunning, refreshLists, setCustomDir, dirLabel } = useAppState()
+const { state, log, logI18n, logParts, clearLog, setProgress, resetProgressBar, setProgressBatch, setSummary, setActionRunning, refreshLists, setCustomDir, dirLabel } = useAppState()
 
 interface PakListEntry extends PakEntry {
   isDir: boolean
@@ -100,7 +100,7 @@ async function unpackSelected(): Promise<void> {
   const paks = state.pakFiles.filter((entry) => selected.has(entry.fullPath)).map((entry) => entry.fullPath)
 
   if (folders.length === 0 && paks.length === 0) {
-    log(t('pak.selectFirst'), 'error')
+    logI18n('pak.selectFirst', undefined, 'error')
     return
   }
 
@@ -129,18 +129,18 @@ async function unpackSelected(): Promise<void> {
           : null,
       )
       setSummary(t('pak.preparingExtract'), 'info')
-      log(t('pak.preparingExtractLog', { folder: inputFolder }))
+      logI18n('pak.preparingExtractLog', { folder: inputFolder })
       resetProgressBar()
       const result = await electron.extractFolder(payload)
       if (result.canceled) {
         canceled = true
-        log(t('pak.extractionCanceled'), 'warning')
+        logI18n('pak.extractionCanceled', undefined, 'warning')
         setSummary(t('pak.extractionCanceled'), 'info')
         break
       }
       if (!result.success) {
         setSummary(result.error || t('pak.extractFailed'), 'error')
-        log(t('pak.extractFailedLog', { error: result.error }), 'error')
+        logI18n('pak.extractFailedLog', { error: result.error }, 'error')
         break
       }
       const extracted = result.results?.paksExtracted ?? 0
@@ -151,29 +151,22 @@ async function unpackSelected(): Promise<void> {
       const skipped = result.results?.skippedExisting ?? []
       const failed = result.results?.failedPaks ?? []
       totalExtracted += extracted
-      const skippedNote = skipped.length > 0 ? ` ${t('pak.skippedIgnored', { n: skipped.length })}` : ''
-      log(`${t('pak.extractDoneLog', { n: extracted, out: result.results?.outputFolder })}${skippedNote}`, 'success')
-      log(
-        t('pak.extractedFilesLog', {
-          count: extractedFiles,
-          size: formatBytes(extractedBytes) || '0 B',
-        }),
-        'success',
-      )
-      log(
-        t('pak.movedFilesLog', {
-          count: copied,
-          size: formatBytes(movedBytes) || '0 B',
-        }),
-        'success',
-      )
+      const doneParts: LogPart[] = [
+        { key: 'pak.extractDoneLog', params: { n: extracted, out: result.results?.outputFolder ?? '' } },
+      ]
+      if (skipped.length > 0) {
+        doneParts.push({ text: ' ' }, { key: 'pak.skippedIgnored', params: { n: skipped.length } })
+      }
+      logParts(doneParts, 'success')
+      logI18n('pak.extractedFilesLog', { count: extractedFiles, size: formatBytes(extractedBytes) || '0 B' }, 'success')
+      logI18n('pak.movedFilesLog', { count: copied, size: formatBytes(movedBytes) || '0 B' }, 'success')
       if (failed.length > 0) {
         folderHadFailures = true
         for (const item of failed.slice(0, 20)) {
-          log(t('pak.failedItem', { name: item.relPakPath, error: item.error }), 'error')
+          logI18n('pak.failedItem', { name: item.relPakPath, error: item.error }, 'error')
         }
         if (failed.length > 20) {
-          log(t('pak.failedMore', { n: failed.length - 20 }), 'error')
+          logI18n('pak.failedMore', { n: failed.length - 20 }, 'error')
         }
         setSummary(t('pak.partialSummary', { ok: extracted, fail: failed.length }), 'error')
       }
@@ -183,17 +176,12 @@ async function unpackSelected(): Promise<void> {
       // Clear folder batch so multi-pak progress uses packageIndex from IPC.
       setProgressBatch(null)
       const shouldDecrypt = decryptAfterUnpak.value
-      const actionText = shouldDecrypt ? t('pak.extractingDecrypting') : t('pak.extracting')
       resetProgressBar()
       setSummary(
         shouldDecrypt ? t('pak.extractingDecryptingN', { n: paks.length }) : t('pak.extractingN', { n: paks.length }),
         'info',
       )
-      log(
-        shouldDecrypt
-          ? t('pak.extractingDecryptingNLog', { n: paks.length })
-          : t('pak.extractingNLog', { n: paks.length }),
-      )
+      logI18n(shouldDecrypt ? 'pak.extractingDecryptingNLog' : 'pak.extractingNLog', { n: paks.length })
       const result = shouldDecrypt
         ? await electron.unpakDecryptPackages(paks, {
             showFileProgress: getShowFileNames(),
@@ -208,11 +196,19 @@ async function unpackSelected(): Promise<void> {
       if (result.success) {
         const successCount = result.results?.success.length ?? 0
         const failedCount = result.results?.failed.length ?? 0
-        log(t('pak.actionDone', { action: actionText, ok: successCount, fail: failedCount }), 'success')
+        logI18n(
+          'pak.actionDone',
+          {
+            action: { i18n: shouldDecrypt ? 'pak.extractingDecrypting' : 'pak.extracting' },
+            ok: successCount,
+            fail: failedCount,
+          },
+          'success',
+        )
         if (failedCount > 0) {
           result.results?.failed.forEach((fail) => {
             const entry = fail as OperationFailure
-            log(t('pak.failedItem', { name: entry.packageName, error: entry.error }), 'error')
+            logI18n('pak.failedItem', { name: entry.packageName, error: entry.error }, 'error')
           })
           setSummary(t('pak.partialSummary', { ok: successCount, fail: failedCount }), 'error')
         } else {
@@ -220,10 +216,10 @@ async function unpackSelected(): Promise<void> {
         }
       } else if (result.canceled) {
         canceled = true
-        log(t('pak.extractionCanceled'), 'warning')
+        logI18n('pak.extractionCanceled', undefined, 'warning')
         setSummary(t('pak.extractionCanceled'), 'info')
       } else {
-        log(t('pak.actionFailedOp', { error: result.error }), 'error')
+        logI18n('pak.actionFailedOp', { error: result.error }, 'error')
         setSummary(t('pak.extractFailed'), 'error')
       }
     }
@@ -232,12 +228,12 @@ async function unpackSelected(): Promise<void> {
       setSummary(t('pak.extractedSummary', { n: totalExtracted, m: folders.length, dir: dirLabel('unpaked') }), 'success')
     }
   } catch (err) {
-    log(t('pak.unexpectedLog', { error: err instanceof Error ? err.message : String(err) }), 'error')
+    logI18n('pak.unexpectedLog', { error: err instanceof Error ? err.message : String(err) }, 'error')
     setSummary(t('pak.unexpected'), 'error')
   } finally {
     setProgressBatch(null)
     setActionRunning(false)
-    setProgress(0, t('progress.idle'))
+    setProgress(0, 'progress.idle')
     selectedPaths.value = []
     await refreshLists()
   }

@@ -1,11 +1,11 @@
-import { existsSync, readdirSync, realpathSync, statSync } from 'fs'
+import { existsSync, realpathSync } from 'fs'
+import { promises as fsp } from 'fs'
 import path from 'path'
 import { MessageChannel } from 'node:worker_threads'
 import { Piscina } from 'piscina'
 import type { ProgressPayload } from '../../shared/api-types'
 import type { ProgressCallback } from './progress'
 import type { DecryptTaskInput, DecryptTaskResult } from '../workers/decrypt-task'
-import { mapPool } from './parallel'
 import { cpuThreadsForWork, workerResourceLimits } from './threads'
 
 export interface DecryptFileProgress extends ProgressPayload {
@@ -97,33 +97,20 @@ export function resolveCountWorkerFile(): string {
 	return resolveWorkerFile('count-task')
 }
 
+export function resolveScanWorkerFile(): string {
+	return resolveWorkerFile('scan-folder-task')
+}
+
+export function resolvePakScanWorkerFile(): string {
+	return resolveWorkerFile('pak-scan-task')
+}
+
 export function createDecryptPool(): Piscina<DecryptTaskInput | string[], DecryptTaskResult> {
 	return new Piscina({
 		filename: resolveDecryptWorkerFile(),
 		maxThreads: cpuThreadsForWork(),
 		resourceLimits: workerResourceLimits(),
 	})
-}
-
-function collectFiles(folderPath: string): string[] {
-	const files: string[] = []
-	function walk(dir: string): void {
-		for (const name of readdirSync(dir)) {
-			if (name === '.pak-metadata.json') continue
-			const fullPath = path.join(dir, name)
-			const stat = statSync(fullPath)
-			if (stat.isDirectory()) {
-				walk(fullPath)
-			} else if (stat.isFile()) {
-				const ext = path.extname(name).toLowerCase()
-				if (ext === '.xml' || ext === '.html') {
-					files.push(fullPath)
-				}
-			}
-		}
-	}
-	walk(folderPath)
-	return files
 }
 
 function percentOf(current: number, total: number): number {
@@ -135,32 +122,22 @@ export async function decryptFolderParallel(
 	options: DecryptFolderOptions = {},
 ): Promise<DecryptFolderResult> {
 	const resolved = path.resolve(folder)
-	if (!existsSync(resolved) || !statSync(resolved).isDirectory()) {
+	const rootStat = await fsp.stat(resolved).catch(() => null)
+	if (!rootStat?.isDirectory()) {
 		throw new Error(`Input folder not found: ${resolved}`)
 	}
 
-	const files = collectFiles(resolved)
-	const total = files.length
 	const results: DecryptFolderResult = { success: [], failed: [] }
-	if (total === 0) {
-		return results
-	}
-
 	const onProgress = options.onProgress
 	const externalPool = options.pool
 	const pool = externalPool ?? createDecryptPool()
 	const shouldDestroy = !externalPool
-	// Small batches so Piscina queue stays full with up to maxThreads in flight.
-	const batchSize = 32
-	const batches: string[][] = []
-	for (let i = 0; i < total; i += batchSize) {
-		batches.push(files.slice(i, i + batchSize))
-	}
 
 	let current = 0
+	let total = 0
 	const reported = new Set<string>()
 
-	function reportFile(filePath: string, ok: boolean, error?: string): void {
+	function reportFile(filePath: string, ok: boolean, error?: string, bytes?: number): void {
 		// Dedupe: per-file port events update results immediately; the
 		// worker return value only reconciles items never reported.
 		if (reported.has(filePath)) return
@@ -172,12 +149,7 @@ export async function decryptFolderParallel(
 		} else {
 			results.failed.push({ path: relPath, error: error ?? 'Unknown error' })
 		}
-		let bytesDelta: number | undefined
-		try {
-			bytesDelta = statSync(filePath).size
-		} catch {
-			bytesDelta = undefined
-		}
+		const bytesDelta = typeof bytes === 'number' && bytes > 0 ? bytes : undefined
 		onProgress?.(
 			{
 				stage: 'decrypt',
@@ -196,12 +168,85 @@ export async function decryptFolderParallel(
 		)
 	}
 
+	const queue: string[][] = []
+	let listed = false
+	let listError: unknown = null
+	const waiters: Array<() => void> = []
+	const poke = (): void => {
+		const fn = waiters.shift()
+		fn?.()
+	}
+	const pokeAll = (): void => {
+		const pending = waiters.splice(0, waiters.length)
+		for (const fn of pending) fn()
+	}
+
 	try {
 		if (options.signal?.aborted) throw new Error('Operation canceled')
-		await mapPool(
-			batches,
-			cpuThreadsForWork(),
-			async (batch) => {
+		const listChannel = new MessageChannel()
+		const listAbort = (): void => {
+			try {
+				listChannel.port1.postMessage({ type: 'abort' })
+			} catch {
+				// ignore
+			}
+		}
+		const onListMessage = (msg: unknown): void => {
+			if (!msg || typeof msg !== 'object') return
+			const filesRaw = (msg as { files?: unknown }).files
+			if ((msg as { type?: unknown }).type !== 'batch' || !Array.isArray(filesRaw)) return
+			const files = filesRaw.filter((file): file is string => typeof file === 'string' && file.length > 0)
+			if (files.length === 0) return
+			total += files.length
+			queue.push(files)
+			poke()
+		}
+		try {
+			listChannel.port1.on('message', onListMessage)
+		} catch {
+			// ignore
+		}
+		if (options.signal) {
+			if (options.signal.aborted) listAbort()
+			else options.signal.addEventListener('abort', listAbort, { once: true })
+		}
+		const listPromise = pool.run(
+			{ op: 'list', root: resolved, port: listChannel.port2 } as DecryptTaskInput,
+			{ transferList: [listChannel.port2], signal: options.signal ?? undefined } as unknown as Parameters<typeof pool.run>[1],
+		).then(
+			() => {
+				listed = true
+				pokeAll()
+			},
+			(error: unknown) => {
+				listError = error
+				listed = true
+				pokeAll()
+			},
+		)
+
+		async function takeBatch(): Promise<string[] | null> {
+			for (;;) {
+				if (listError) throw listError
+				const next = queue.shift()
+				if (next) {
+					if (queue.length > 0) poke()
+					return next
+				}
+				if (listed) return null
+				await new Promise<void>((resolve) => {
+					waiters.push(resolve)
+				})
+			}
+		}
+
+		const consumers = Math.max(1, cpuThreadsForWork())
+		await Promise.all(
+			Array.from({ length: consumers }, async () => {
+				for (;;) {
+					if (options.signal?.aborted) throw new Error('Operation canceled')
+					const batch = await takeBatch()
+					if (!batch) return
 				if (options.signal?.aborted) throw new Error('Operation canceled')
 				const channel = new MessageChannel()
 				const { port1, port2 } = channel
@@ -220,8 +265,9 @@ export async function decryptFolderParallel(
 					if (typeof filePath !== 'string' || filePath.length === 0) return
 					const ok = m['success'] === true
 					const err = typeof m['error'] === 'string' ? (m['error'] as string) : undefined
+					const bytes = typeof m['bytes'] === 'number' ? (m['bytes'] as number) : undefined
 					// Per-file call: createProgressSender batches/throttles IPC to 1/sec.
-					reportFile(filePath, ok, err)
+					reportFile(filePath, ok, err, bytes)
 				}
 				try {
 					;(port1 as unknown as { on: (ev: string, cb: (m: unknown) => void) => void }).on('message', messageHandler)
@@ -272,9 +318,23 @@ export async function decryptFolderParallel(
 						// ignore if already detached/closed
 					}
 				}
-			},
-			options.signal,
+				}
+			}),
 		)
+		await listPromise
+		if (listError) throw listError
+		try {
+			listChannel.port1.close()
+		} catch {
+			// ignore
+		}
+		if (options.signal) {
+			try {
+				options.signal.removeEventListener('abort', listAbort)
+			} catch {
+				// ignore
+			}
+		}
 	} finally {
 		if (shouldDestroy) {
 			await pool.destroy()
