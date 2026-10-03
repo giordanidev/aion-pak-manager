@@ -1,10 +1,13 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, markRaw, onBeforeUnmount, ref, shallowRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { OperationFailure } from '../../shared/api-types'
 import { getShowFileNames, useElectron } from '../composables/useElectron'
 import { useAppState, basename } from '../composables/useAppState'
-import { useVirtualWindow, VIRTUAL_ROW_HEIGHT } from '../composables/useVirtualWindow'
+import { useIndexedTreeSearch } from '../composables/useIndexedTreeSearch'
+import { useVirtualWindow } from '../composables/useVirtualWindow'
+import { buildFileTreeIndex } from '../lib/file-tree-index'
+import { readStructureCache, structureCacheKey, structureStamp, writeStructureCache } from '../lib/structure-cache'
 
 const props = withDefaults(
   defineProps<{
@@ -29,11 +32,11 @@ const loading = ref(false)
 const treeBuilding = ref(false)
 const error = ref('')
 const files = ref<string[]>([])
+const contentCount = ref(0)
 const selected = ref<string[]>([])
 const decrypt = ref(false)
 const searchInput = ref('')
 const searchQuery = ref('')
-const searchBusy = ref(false)
 let searchTimer: ReturnType<typeof setTimeout> | undefined
 const requestId = ref(0)
 const dropActive = ref(false)
@@ -93,9 +96,39 @@ function emptyRoot(): TreeNode {
   return { name: '', key: '', children: new Map(), isFile: false, count: 0 }
 }
 
-const treeRoot = ref<TreeNode>(emptyRoot())
+const treeRoot = shallowRef<TreeNode>(emptyRoot())
 const expanded = ref<Set<string>>(new Set())
 const selectedExpanded = ref<Set<string>>(new Set())
+
+function isSearchDir(node: TreeNode): boolean {
+  return node.children.size > 0
+}
+
+function toLeftRow(node: TreeNode, depth: number, isOpen: boolean, mode: 'browse' | 'search'): LeftRow {
+  const isDir = node.children.size > 0
+  return {
+    key: node.key,
+    name: mode === 'search' ? node.key : node.name,
+    depth,
+    isDir,
+    expanded: isOpen,
+    node,
+  }
+}
+
+const {
+  searchBusy,
+  listCount: leftCount,
+  rowsForWindow,
+  setIndex,
+  cancelSearch,
+} = useIndexedTreeSearch<TreeNode, LeftRow>({
+  treeRoot,
+  expanded,
+  searchQuery,
+  isDir: isSearchDir,
+  toRow: toLeftRow,
+})
 
 function sortChildren(node: TreeNode): TreeNode[] {
   return [...node.children.values()].sort((a, b) => {
@@ -112,61 +145,6 @@ const isSelected = (file: string): boolean => selected.value.includes(file)
 const searchActive = computed(() => searchQuery.value.trim().length > 0)
 const searchPending = computed(() => searchInput.value.trim() !== searchQuery.value.trim())
 
-function collectMatches(node: TreeNode, query: string, out: TreeNode[]): void {
-  for (const child of node.children.values()) {
-    if (child.name.toLowerCase().includes(query)) out.push(child)
-    else collectMatches(child, query, out)
-  }
-}
-
-function buildLeftRows(query: string): LeftRow[] {
-  const rows: LeftRow[] = []
-  if (query) {
-    function emit(node: TreeNode, depth: number): void {
-      const isDir = node.children.size > 0
-      const isExpanded = expanded.value.has(node.key)
-      rows.push({ key: node.key, name: node.key, depth, isDir, expanded: isExpanded, node })
-      if (isDir && isExpanded) {
-        for (const child of sortChildren(node)) emit(child, depth + 1)
-      }
-    }
-    const matches: TreeNode[] = []
-    collectMatches(treeRoot.value, query, matches)
-    matches.sort((a, b) => {
-      const aDir = a.children.size > 0
-      const bDir = b.children.size > 0
-      if (aDir !== bDir) return aDir ? -1 : 1
-      return a.key.localeCompare(b.key)
-    })
-    for (const match of matches) emit(match, 0)
-    return rows
-  }
-  function walk(node: TreeNode, depth: number): void {
-    for (const child of sortChildren(node)) {
-      const isDir = child.children.size > 0
-      const isExpanded = expanded.value.has(child.key)
-      rows.push({ key: child.key, name: child.name, depth, isDir, expanded: isExpanded, node: child })
-      if (isDir && isExpanded) walk(child, depth + 1)
-    }
-  }
-  walk(treeRoot.value, 0)
-  return rows
-}
-
-const leftRows = ref<LeftRow[]>([])
-let rowsGen = 0
-watch([searchQuery, treeRoot, expanded], async () => {
-  const id = ++rowsGen
-  const query = searchQuery.value.trim().toLowerCase()
-  if (query) {
-    searchBusy.value = true
-    await new Promise<void>((resolve) => setTimeout(resolve, 0))
-    if (id !== rowsGen) return
-  }
-  leftRows.value = buildLeftRows(query)
-  if (id === rowsGen) searchBusy.value = false
-})
-
 watch(searchInput, (value) => {
   if (searchTimer) clearTimeout(searchTimer)
   if (!value.trim()) {
@@ -175,25 +153,22 @@ watch(searchInput, (value) => {
   }
   searchTimer = setTimeout(() => {
     searchQuery.value = value
-  }, 400)
+  }, 200)
 })
 
-const leftCount = computed(() => leftRows.value.length)
 const {
   start: leftStart,
   end: leftEnd,
   totalHeight: leftTotalHeight,
   onScroll: onLeftScroll,
   bind: bindLeftScroll,
+  rowTop: leftRowTop,
+  scrollToTop: scrollLeftToTop,
 } = useVirtualWindow(leftCount)
-const visibleLeftRows = computed(() => {
-  const rows = leftRows.value
-  const items: { row: LeftRow; index: number }[] = []
-  for (let i = leftStart.value; i < leftEnd.value; i += 1) {
-    const row = rows[i]
-    if (row) items.push({ row, index: i })
-  }
-  return items
+const visibleLeftRows = computed(() => rowsForWindow(leftStart.value, leftEnd.value))
+
+watch(searchQuery, () => {
+  scrollLeftToTop()
 })
 
 const selectedTree = computed<TreeNode>(() => {
@@ -240,6 +215,7 @@ const {
   totalHeight: selectedTotalHeight,
   onScroll: onSelectedScroll,
   bind: bindSelectedScroll,
+  rowTop: selectedRowTop,
 } = useVirtualWindow(selectedCount)
 const visibleSelectedRows = computed(() => {
   const rows = selectedRows.value
@@ -634,13 +610,35 @@ async function loadContents(): Promise<void> {
   const pakPath = activePath.value
   if (!pakPath) return
   const id = ++requestId.value
+  const cacheKey = structureCacheKey('pak', pakPath)
   loading.value = true
   treeBuilding.value = false
   error.value = ''
   files.value = []
+  contentCount.value = 0
+  cancelSearch()
+  setIndex(null)
   treeRoot.value = emptyRoot()
   expanded.value = new Set()
   try {
+    let stamp = ''
+    try {
+      const stampResult = await electron.sourceStamp(pakPath, 'pak', contentBase.value)
+      if (id !== requestId.value) return
+      if (stampResult.success && typeof stampResult.mtimeMs === 'number') {
+        stamp = structureStamp(stampResult.mtimeMs, stampResult.size ?? 0)
+      }
+    } catch {
+      stamp = ''
+    }
+    const usableStamp = stamp || 'session'
+    const cached = readStructureCache<TreeNode, { count: number }>(cacheKey, usableStamp)
+    if (cached) {
+      contentCount.value = cached.meta.count
+      setIndex(cached.index)
+      treeRoot.value = cached.root
+      return
+    }
     const result = await electron.listPakContents(pakPath, contentBase.value)
     if (id !== requestId.value) return
     if (!result.success) {
@@ -648,11 +646,22 @@ async function loadContents(): Promise<void> {
       return
     }
     files.value = result.files ?? []
+    const count = files.value.length
     loading.value = false
     treeBuilding.value = true
     const root = await buildTreeChunked(files.value)
     if (id !== requestId.value) return
-    treeRoot.value = root
+    const indexed = await buildFileTreeIndex(root, {
+      isDir: isSearchDir,
+      onYield: yieldToUi,
+      isCancelled: () => id !== requestId.value,
+    })
+    if (!indexed || id !== requestId.value) return
+    files.value = []
+    contentCount.value = count
+    setIndex(indexed)
+    treeRoot.value = markRaw(root)
+    writeStructureCache(cacheKey, usableStamp, treeRoot.value, indexed, { count })
   } catch (err) {
     if (id !== requestId.value) return
     error.value = t('pak.contentsFailed', { error: err instanceof Error ? err.message : String(err) })
@@ -785,6 +794,9 @@ watch(
       searchQuery.value = ''
       error.value = ''
       files.value = []
+      contentCount.value = 0
+      cancelSearch()
+      setIndex(null)
       treeRoot.value = emptyRoot()
       expanded.value = new Set()
       selectedExpanded.value = new Set()
@@ -801,6 +813,10 @@ watch(
       void loadContents()
       window.addEventListener('keydown', onKeydown)
     } else {
+      cancelSearch()
+      setIndex(null)
+      treeRoot.value = emptyRoot()
+      expanded.value = new Set()
       window.removeEventListener('keydown', onKeydown)
     }
   },
@@ -866,7 +882,7 @@ onBeforeUnmount(() => {
             <span
               v-if="!loading && !treeBuilding && !error"
               class="inline-flex h-5 min-w-5 items-center justify-center rounded-full border border-border bg-deepest px-1.5 text-center text-[11px] font-semibold leading-none tabular-nums whitespace-nowrap text-bright"
-            >{{ files.length }}</span>
+            >{{ contentCount }}</span>
           </div>
           <div class="relative min-w-0 flex-none">
             <input
@@ -889,8 +905,11 @@ onBeforeUnmount(() => {
               <span class="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/35 border-t-white"></span>{{ t('pak.loadingContents') }}
             </div>
             <div v-else-if="error" class="flex h-full items-center justify-center gap-2 text-[13px] text-red">{{ error }}</div>
-            <div v-else-if="files.length === 0" class="flex h-full items-center justify-center gap-2 text-[13px] text-dim">{{ t('pak.noFiles') }}</div>
-            <div v-else-if="searchActive && leftRows.length === 0" class="flex h-full items-center justify-center gap-2 text-[13px] text-dim">{{ t('pak.searchEmpty') }}</div>
+            <div v-else-if="contentCount === 0" class="flex h-full items-center justify-center gap-2 text-[13px] text-dim">{{ t('pak.noFiles') }}</div>
+            <div v-else-if="searchBusy" class="flex h-full items-center justify-center gap-2 text-[13px] text-dim">
+              <span class="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/35 border-t-white"></span>
+            </div>
+            <div v-else-if="searchActive && leftCount === 0" class="flex h-full items-center justify-center gap-2 text-[13px] text-dim">{{ t('pak.searchEmpty') }}</div>
             <div v-else class="relative w-full" :style="{ height: `${leftTotalHeight}px` }">
             <div
               v-for="item in visibleLeftRows"
@@ -901,7 +920,7 @@ onBeforeUnmount(() => {
                 'bg-accent/30': repakEditable && repakedSelected?.key === item.row.key,
                 'bg-green/[0.22] outline-dashed outline-1 -outline-offset-1 outline-green': rowDropHighlight(item.row),
               }"
-              :style="{ top: `${item.index * VIRTUAL_ROW_HEIGHT}px`, paddingLeft: `${4 + item.row.depth * 14}px` }"
+              :style="{ top: `${leftRowTop(item.index)}px`, paddingLeft: `${4 + item.row.depth * 14}px` }"
               @click="onRowClick(item.row)"
               @dragover.stop="onRowDragOver(item.row, $event)"
             >
@@ -958,7 +977,7 @@ onBeforeUnmount(() => {
               v-for="item in visibleSelectedRows"
               :key="item.row.key"
               class="absolute inset-x-0 flex h-7 cursor-pointer items-center gap-1.5 overflow-hidden whitespace-nowrap px-1.5 hover:bg-hover"
-              :style="{ top: `${item.index * VIRTUAL_ROW_HEIGHT}px`, paddingLeft: `${4 + item.row.depth * 14}px` }"
+              :style="{ top: `${selectedRowTop(item.index)}px`, paddingLeft: `${4 + item.row.depth * 14}px` }"
               @click="!item.row.isDir && removeFile(item.row.key)"
             >
               <button

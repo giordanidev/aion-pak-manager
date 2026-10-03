@@ -19,6 +19,13 @@ export interface PakDatabasePakEntry {
 	fileCount?: number;
 }
 
+export interface SourceStampResult {
+	success: boolean;
+	mtimeMs?: number;
+	size?: number;
+	error?: string;
+}
+
 export interface PakDatabaseInfo {
 	relPakPath?: string;
 	/** Aggregate DB root folder name (e.g. `PTB`). */
@@ -368,6 +375,8 @@ export interface ElectronApi {
 	openFolder(dir: string): Promise<OpenFolderResult>;
 	listPakDatabases(unpakedDir?: string): Promise<ListPakDatabasesResult>;
 	readPakDatabase(dbPath: string, base?: string): Promise<ReadPakDatabaseResult>;
+	/** mtime + size, so a cached file tree can be reused until the source changes. */
+	sourceStamp(targetPath: string, kind: 'pak' | 'database', base?: string): Promise<SourceStampResult>;
 	getSettings(): Promise<SettingsResult>;
 	setSettings(partial: AppSettings): Promise<SettingsResult>;
 	checkUpdate(force?: boolean): Promise<CheckUpdateResult>;

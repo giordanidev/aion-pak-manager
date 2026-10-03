@@ -399,6 +399,32 @@ export function registerIpcHandlers(getMainWindow: GetMainWindow): void {
 		}
 	})
 
+	ipcMain.handle('source-stamp', async (_event, payload) => {
+		try {
+			const targetPath = isRecord(payload) && typeof payload.targetPath === 'string' ? payload.targetPath : ''
+			if (!targetPath) throw new Error('No path provided')
+			const kind = isRecord(payload) && payload.kind === 'database' ? 'database' : 'pak'
+			const resolved = path.resolve(targetPath)
+			const payloadBase = readDirOverride(payload, 'base')
+			if (kind === 'database') {
+				const allowedBases = [path.resolve(UNPAKED_DIR), ...settingsCustomBases()]
+				if (payloadBase) allowedBases.push(payloadBase)
+				const inside = allowedBases.some((base) => resolved === base || resolved.startsWith(base + path.sep))
+				if (!inside) throw new Error('Access denied: database path outside unpaked directory')
+			} else {
+				const allowedBases = [path.resolve(PAK_DIR), path.resolve(REPAKED_DIR), path.resolve(UNPAKED_DIR), ...settingsCustomBases()]
+				if (payloadBase) allowedBases.push(payloadBase)
+				if (!allowedBases.some((base) => resolved.startsWith(base + path.sep))) {
+					throw new Error('Access denied: pak path outside PAK directories')
+				}
+			}
+			const entry = await stat(resolved)
+			return { success: true, mtimeMs: entry.mtimeMs, size: entry.size }
+		} catch (error) {
+			return { success: false, error: errorMessage(error) }
+		}
+	})
+
 	ipcMain.handle('read-pak-database', async (_event, payload) => {
 		try {
 			const dbPath = isRecord(payload) && typeof payload.dbPath === 'string'

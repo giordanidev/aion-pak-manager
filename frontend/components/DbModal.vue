@@ -1,10 +1,13 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, markRaw, onBeforeUnmount, ref, shallowRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { PakDatabaseInfo } from '../../shared/api-types'
 import { getShowFileNames, useElectron } from '../composables/useElectron'
 import { useAppState } from '../composables/useAppState'
-import { useVirtualWindow, VIRTUAL_ROW_HEIGHT } from '../composables/useVirtualWindow'
+import { useIndexedTreeSearch } from '../composables/useIndexedTreeSearch'
+import { useVirtualWindow } from '../composables/useVirtualWindow'
+import { buildFileTreeIndex } from '../lib/file-tree-index'
+import { readStructureCache, structureCacheKey, structureStamp, writeStructureCache } from '../lib/structure-cache'
 
 const props = defineProps<{ open: boolean; initialDbPath?: string | null; folderPath?: string | null }>()
 const emit = defineEmits<{ (e: 'close'): void; (e: 'done'): void }>()
@@ -21,7 +24,6 @@ const requestId = ref(0)
 const selected = ref<string[]>([])
 const searchInput = ref('')
 const searchQuery = ref('')
-const searchBusy = ref(false)
 let searchTimer: ReturnType<typeof setTimeout> | undefined
 const expandingKey = ref<string | null>(null)
 
@@ -59,9 +61,41 @@ function emptyRoot(): TreeNode {
   return { name: '', key: '', children: new Map(), kind: 'dir', count: 0 }
 }
 
-const treeRoot = ref<TreeNode>(emptyRoot())
+const treeRoot = shallowRef<TreeNode>(emptyRoot())
 const expanded = ref<Set<string>>(new Set())
 const selectedExpanded = ref<Set<string>>(new Set())
+
+function isSearchDir(node: TreeNode): boolean {
+  return node.children.size > 0 || node.kind === 'dir'
+}
+
+function toVisibleRow(node: TreeNode, depth: number, isOpen: boolean, _mode: 'browse' | 'search'): VisibleRow {
+  const expandable = node.children.size > 0
+  return {
+    key: node.key,
+    name: node.name,
+    depth,
+    isDir: node.kind === 'dir',
+    expandable,
+    expanded: isOpen,
+    count: node.count,
+    node,
+  }
+}
+
+const {
+  searchBusy,
+  listCount: leftCount,
+  rowsForWindow,
+  setIndex,
+  cancelSearch,
+} = useIndexedTreeSearch<TreeNode, VisibleRow>({
+  treeRoot,
+  expanded,
+  searchQuery,
+  isDir: isSearchDir,
+  toRow: toVisibleRow,
+})
 
 function sortChildren(node: TreeNode): TreeNode[] {
   return [...node.children.values()].sort((a, b) => {
@@ -80,62 +114,6 @@ const searchActive = computed(() => searchQuery.value.trim().length > 0)
 const searchPending = computed(() => searchInput.value.trim() !== searchQuery.value.trim())
 const isSelected = (file: string): boolean => selected.value.includes(file)
 
-function collectMatches(node: TreeNode, query: string, out: TreeNode[]): void {
-  for (const child of node.children.values()) {
-    if (child.name.toLowerCase().includes(query)) out.push(child)
-    else collectMatches(child, query, out)
-  }
-}
-
-function buildVisibleRows(query: string): VisibleRow[] {
-  const rows: VisibleRow[] = []
-  function push(node: TreeNode, depth: number): void {
-    const expandable = node.children.size > 0
-    const isExpanded = expanded.value.has(node.key)
-    rows.push({
-      key: node.key,
-      name: node.name,
-      depth,
-      isDir: node.kind === 'dir',
-      expandable,
-      expanded: isExpanded,
-      count: node.count,
-      node,
-    })
-    if (expandable && isExpanded) {
-      for (const child of sortChildren(node)) push(child, depth + 1)
-    }
-  }
-  if (query) {
-    const matches: TreeNode[] = []
-    collectMatches(treeRoot.value, query, matches)
-    matches.sort((a, b) => {
-      const aDir = a.children.size > 0 || a.kind === 'dir'
-      const bDir = b.children.size > 0 || b.kind === 'dir'
-      if (aDir !== bDir) return aDir ? -1 : 1
-      return a.key.localeCompare(b.key)
-    })
-    for (const match of matches) push(match, 0)
-    return rows
-  }
-  for (const child of sortChildren(treeRoot.value)) push(child, 0)
-  return rows
-}
-
-const visibleRows = ref<VisibleRow[]>([])
-let rowsGen = 0
-watch([searchQuery, treeRoot, expanded], async () => {
-  const id = ++rowsGen
-  const query = searchQuery.value.trim().toLowerCase()
-  if (query) {
-    searchBusy.value = true
-    await new Promise<void>((resolve) => setTimeout(resolve, 0))
-    if (id !== rowsGen) return
-  }
-  visibleRows.value = buildVisibleRows(query)
-  if (id === rowsGen) searchBusy.value = false
-})
-
 watch(searchInput, (value) => {
   if (searchTimer) clearTimeout(searchTimer)
   if (!value.trim()) {
@@ -144,25 +122,22 @@ watch(searchInput, (value) => {
   }
   searchTimer = setTimeout(() => {
     searchQuery.value = value
-  }, 400)
+  }, 200)
 })
 
-const leftCount = computed(() => visibleRows.value.length)
 const {
   start: leftStart,
   end: leftEnd,
   totalHeight: leftTotalHeight,
   onScroll: onLeftScroll,
   bind: bindLeftScroll,
+  rowTop: leftRowTop,
+  scrollToTop: scrollLeftToTop,
 } = useVirtualWindow(leftCount)
-const windowedRows = computed(() => {
-  const rows = visibleRows.value
-  const items: { row: VisibleRow; index: number }[] = []
-  for (let i = leftStart.value; i < leftEnd.value; i += 1) {
-    const row = rows[i]
-    if (row) items.push({ row, index: i })
-  }
-  return items
+const windowedRows = computed(() => rowsForWindow(leftStart.value, leftEnd.value))
+
+watch(searchQuery, () => {
+  scrollLeftToTop()
 })
 
 const selectedTree = computed<TreeNode>(() => {
@@ -209,6 +184,7 @@ const {
   totalHeight: selectedTotalHeight,
   onScroll: onSelectedScroll,
   bind: bindSelectedScroll,
+  rowTop: selectedRowTop,
 } = useVirtualWindow(selectedCount)
 const windowedSelected = computed(() => {
   const rows = selectedRows.value
@@ -232,24 +208,22 @@ const fileTotal = computed(() => {
 
 const selectedPakCount = computed(() => {
   const info = dbInfo.value
-  if (!info) return 0
-  const paks = info.paks && info.paks.length > 0
-    ? info.paks
+  if (!info || selected.value.length === 0) return 0
+  const rels = info.paks && info.paks.length > 0
+    ? info.paks.map((pak) => splitRel(pak.relPakPath).join('/')).filter((rel) => rel.length > 0)
     : info.relPakPath
-      ? [{ relPakPath: info.relPakPath, files: info.files ?? [] }]
+      ? [splitRel(info.relPakPath).join('/')]
       : []
-  const keys = new Set(selected.value)
-  let count = 0
-  for (const pak of paks) {
-    const rel = splitRel(pak.relPakPath).join('/')
-    const hit = pak.files.some((file) => {
-      const relFile = splitRel(file).join('/')
-      if (!relFile) return false
-      return keys.has(rel ? `${rel}/${relFile}` : relFile)
-    })
-    if (hit) count += 1
+  if (rels.length === 0) return 0
+  const hit = new Set<string>()
+  for (const file of selected.value) {
+    let best = ''
+    for (const rel of rels) {
+      if ((file === rel || file.startsWith(`${rel}/`)) && rel.length > best.length) best = rel
+    }
+    if (best) hit.add(best)
   }
-  return count
+  return hit.size
 })
 
 function isPakName(name: string): boolean {
@@ -404,28 +378,70 @@ function defaultExpanded(root: TreeNode): Set<string> {
   return next
 }
 
+function slimDatabaseInfo(info: PakDatabaseInfo): PakDatabaseInfo {
+  const paks = info.paks?.map((pak) => ({
+    relPakPath: pak.relPakPath,
+    destDir: pak.destDir,
+    files: [] as string[],
+    fileCount: pak.fileCount ?? pak.files.length,
+  }))
+  return { ...info, files: [], paks }
+}
+
 async function loadDatabase(dbPath: string): Promise<void> {
   const id = ++requestId.value
+  const cacheKey = structureCacheKey('db', dbPath)
   loading.value = true
   building.value = false
   error.value = ''
   dbInfo.value = null
+  cancelSearch()
+  setIndex(null)
   treeRoot.value = emptyRoot()
   expanded.value = new Set()
   try {
+    let stamp = ''
+    try {
+      const stampResult = await electron.sourceStamp(dbPath, 'database', state.customDirs.unpaked || undefined)
+      if (id !== requestId.value) return
+      if (stampResult.success && typeof stampResult.mtimeMs === 'number') {
+        stamp = structureStamp(stampResult.mtimeMs, stampResult.size ?? 0)
+      }
+    } catch {
+      stamp = ''
+    }
+    const usableStamp = stamp || 'session'
+    const cached = readStructureCache<TreeNode, PakDatabaseInfo>(cacheKey, usableStamp)
+    if (cached) {
+      dbInfo.value = cached.meta
+      setIndex(cached.index)
+      treeRoot.value = cached.root
+      expanded.value = defaultExpanded(cached.root)
+      return
+    }
     const result = await electron.readPakDatabase(dbPath, state.customDirs.unpaked || undefined)
     if (id !== requestId.value) return
     if (!result.success || !result.info) {
       error.value = t('db.readFail', { error: result.error })
       return
     }
-    dbInfo.value = result.info
+    const info = result.info
     loading.value = false
     building.value = true
-    const root = await buildReconstructedTreeChunked(result.info)
+    const root = await buildReconstructedTreeChunked(info)
     if (id !== requestId.value) return
-    treeRoot.value = root
+    const indexed = await buildFileTreeIndex(root, {
+      isDir: isSearchDir,
+      onYield: yieldToUi,
+      isCancelled: () => id !== requestId.value,
+    })
+    if (!indexed || id !== requestId.value) return
+    const slim = slimDatabaseInfo(info)
+    dbInfo.value = slim
+    setIndex(indexed)
+    treeRoot.value = markRaw(root)
     expanded.value = defaultExpanded(root)
+    writeStructureCache(cacheKey, usableStamp, treeRoot.value, indexed, slim)
   } catch (err) {
     if (id !== requestId.value) return
     error.value = t('db.readFail', { error: err instanceof Error ? err.message : String(err) })
@@ -513,6 +529,8 @@ watch(
       searchQuery.value = ''
       error.value = ''
       dbInfo.value = null
+      cancelSearch()
+      setIndex(null)
       treeRoot.value = emptyRoot()
       expanded.value = new Set()
       selectedExpanded.value = new Set()
@@ -524,6 +542,10 @@ watch(
       }
       window.addEventListener('keydown', onKeydown)
     } else {
+      cancelSearch()
+      setIndex(null)
+      treeRoot.value = emptyRoot()
+      expanded.value = new Set()
       window.removeEventListener('keydown', onKeydown)
     }
   },
@@ -586,15 +608,18 @@ onBeforeUnmount(() => {
               <span class="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/35 border-t-white"></span>{{ t('db.loading') }}
             </div>
             <div v-else-if="error" class="flex h-full items-center justify-center gap-2 text-[13px] text-red">{{ error }}</div>
-            <div v-else-if="searchActive && visibleRows.length === 0" class="flex h-full items-center justify-center gap-2 text-[13px] text-dim">{{ t('pak.searchEmpty') }}</div>
-            <div v-else-if="visibleRows.length === 0" class="flex h-full items-center justify-center gap-2 text-[13px] text-dim">{{ t('db.emptyStructure') }}</div>
+            <div v-else-if="searchBusy" class="flex h-full items-center justify-center gap-2 text-[13px] text-dim">
+              <span class="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/35 border-t-white"></span>
+            </div>
+            <div v-else-if="searchActive && leftCount === 0" class="flex h-full items-center justify-center gap-2 text-[13px] text-dim">{{ t('pak.searchEmpty') }}</div>
+            <div v-else-if="leftCount === 0" class="flex h-full items-center justify-center gap-2 text-[13px] text-dim">{{ t('db.emptyStructure') }}</div>
             <div v-else class="relative w-full" :style="{ height: `${leftTotalHeight}px` }">
               <div
                 v-for="item in windowedRows"
                 :key="item.row.key"
                 class="absolute inset-x-0 flex h-7 cursor-pointer items-center gap-1.5 overflow-hidden whitespace-nowrap px-1.5 hover:bg-hover"
                 :class="{ 'bg-accent/[0.18]': !item.row.expandable && isSelected(item.row.key) }"
-                :style="{ top: `${item.index * VIRTUAL_ROW_HEIGHT}px`, paddingLeft: `${4 + item.row.depth * 14}px` }"
+                :style="{ top: `${leftRowTop(item.index)}px`, paddingLeft: `${4 + item.row.depth * 14}px` }"
                 @click="onRowClick(item.row)"
               >
                 <button
@@ -644,7 +669,7 @@ onBeforeUnmount(() => {
               v-for="item in windowedSelected"
               :key="item.row.key"
               class="absolute inset-x-0 flex h-7 cursor-pointer items-center gap-1.5 overflow-hidden whitespace-nowrap px-1.5 hover:bg-hover"
-              :style="{ top: `${item.index * VIRTUAL_ROW_HEIGHT}px`, paddingLeft: `${4 + item.row.depth * 14}px` }"
+              :style="{ top: `${selectedRowTop(item.index)}px`, paddingLeft: `${4 + item.row.depth * 14}px` }"
               @click="!item.row.isDir && removeFile(item.row.key)"
             >
               <button

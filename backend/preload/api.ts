@@ -17,6 +17,7 @@ import type {
 	ProgressPayload,
 	ProgressOptions,
 	ReadPakDatabaseResult,
+	SourceStampResult,
 	RepackUnpakedPayload,
 	RepackUnpakedSelectionPayload,
 	ResolveConflictPayload,
@@ -157,6 +158,9 @@ export function buildElectronApi(): ElectronApi {
 
 		readPakDatabase: (dbPath: string, base?: string): Promise<ReadPakDatabaseResult> =>
 			ipcRenderer.invoke('read-pak-database', toCloneable({ dbPath, base })),
+
+		sourceStamp: (targetPath: string, kind: 'pak' | 'database', base?: string): Promise<SourceStampResult> =>
+			ipcRenderer.invoke('source-stamp', toCloneable({ targetPath, kind, base })),
 
 		getSettings: (): Promise<SettingsResult> => ipcRenderer.invoke('settings-get'),
 
