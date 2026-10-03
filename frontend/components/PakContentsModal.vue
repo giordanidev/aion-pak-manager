@@ -307,6 +307,23 @@ function rowDropHighlight(row: LeftRow): boolean {
   return repakEditable.value && row.isDir && dropTargetFolder.value === row.key
 }
 
+function inspectListedPak(row: LeftRow): void {
+  if (state.actionRunning || !props.pakPath || row.isDir) return
+  drilledPakPath.value = joinUnder(props.pakPath, row.key)
+  selected.value = []
+  repakedSelected.value = null
+  searchInput.value = ''
+  searchQuery.value = ''
+  void loadContents()
+}
+
+function canInspectPak(row: LeftRow): boolean {
+  if (props.source !== 'pak' || drilledPakPath.value || row.isDir) return false
+  if (isPakName(pakName.value)) return false
+  const base = row.name.split('/').pop() ?? row.name
+  return isPakName(base)
+}
+
 function onRowClick(row: LeftRow): void {
   if (state.actionRunning) return
   if (listingFolder.value) {
@@ -934,6 +951,19 @@ onBeforeUnmount(() => {
               >
                 <span v-if="expandingKey === item.row.key" class="inline-block h-2.5 w-2.5 animate-spin rounded-full border-2 border-white/35 border-t-white"></span>
                 <template v-else>{{ item.row.expanded ? '−' : '+' }}</template>
+              </button>
+              <button
+                v-else-if="canInspectPak(item.row)"
+                type="button"
+                class="inline-flex h-[18px] w-[18px] min-w-[18px] flex-none items-center justify-center rounded border border-border bg-transparent p-0 text-dim cursor-pointer transition duration-150 enabled:hover:bg-hover enabled:hover:text-bright"
+                :title="t('pak.openPakHint')"
+                :disabled="state.actionRunning"
+                @click.stop="inspectListedPak(item.row)"
+              >
+                <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
+                  <circle cx="7" cy="7" r="4.4" />
+                  <path d="M10.4 10.4 14 14" />
+                </svg>
               </button>
               <span v-else class="w-[18px] flex-none"></span>
               <svg v-if="item.row.isDir" class="h-[18px] w-7 flex-none text-accent" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">

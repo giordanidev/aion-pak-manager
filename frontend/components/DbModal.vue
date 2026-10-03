@@ -1,13 +1,13 @@
 <script setup lang="ts">
-import { computed, markRaw, onBeforeUnmount, ref, shallowRef, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, shallowRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { PakDatabaseInfo } from '../../shared/api-types'
 import { getShowFileNames, useElectron } from '../composables/useElectron'
 import { useAppState } from '../composables/useAppState'
 import { useIndexedTreeSearch } from '../composables/useIndexedTreeSearch'
 import { useVirtualWindow } from '../composables/useVirtualWindow'
-import { buildFileTreeIndex } from '../lib/file-tree-index'
-import { readStructureCache, structureCacheKey, structureStamp, writeStructureCache } from '../lib/structure-cache'
+import { emptyDbRoot, isDbSearchDir, type DbTreeNode } from '../lib/pak-database-tree'
+import { warmDatabaseCache } from '../lib/warm-database-cache'
 
 const props = defineProps<{ open: boolean; initialDbPath?: string | null; folderPath?: string | null }>()
 const emit = defineEmits<{ (e: 'close'): void; (e: 'done'): void }>()
@@ -27,15 +27,7 @@ const searchQuery = ref('')
 let searchTimer: ReturnType<typeof setTimeout> | undefined
 const expandingKey = ref<string | null>(null)
 
-type NodeKind = 'dir' | 'file'
-
-interface TreeNode {
-  name: string
-  key: string
-  children: Map<string, TreeNode>
-  kind: NodeKind
-  count: number
-}
+type TreeNode = DbTreeNode
 
 interface VisibleRow {
   key: string
@@ -57,17 +49,9 @@ interface SelectedRow {
   node: TreeNode
 }
 
-function emptyRoot(): TreeNode {
-  return { name: '', key: '', children: new Map(), kind: 'dir', count: 0 }
-}
-
-const treeRoot = shallowRef<TreeNode>(emptyRoot())
+const treeRoot = shallowRef<TreeNode>(emptyDbRoot())
 const expanded = ref<Set<string>>(new Set())
 const selectedExpanded = ref<Set<string>>(new Set())
-
-function isSearchDir(node: TreeNode): boolean {
-  return node.children.size > 0 || node.kind === 'dir'
-}
 
 function toVisibleRow(node: TreeNode, depth: number, isOpen: boolean, _mode: 'browse' | 'search'): VisibleRow {
   const expandable = node.children.size > 0
@@ -93,7 +77,7 @@ const {
   treeRoot,
   expanded,
   searchQuery,
-  isDir: isSearchDir,
+  isDir: isDbSearchDir,
   toRow: toVisibleRow,
 })
 
@@ -141,7 +125,7 @@ watch(searchQuery, () => {
 })
 
 const selectedTree = computed<TreeNode>(() => {
-  const root = emptyRoot()
+  const root = emptyDbRoot()
   for (const file of selected.value) {
     const parts = splitRel(file)
     let node = root
@@ -309,67 +293,6 @@ function onRowClick(row: VisibleRow): void {
   else addFile(row.key)
 }
 
-function yieldToUi(): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, 0))
-}
-
-function ensureNode(root: TreeNode, baseKey: string, parts: string[], leafKind: NodeKind): TreeNode {
-  let node = root
-  let currentKey = baseKey
-  for (let j = 0; j < parts.length; j += 1) {
-    const part = parts[j] as string
-    const last = j === parts.length - 1
-    currentKey = currentKey ? `${currentKey}/${part}` : part
-    let child = node.children.get(part)
-    if (!child) {
-      child = { name: part, key: currentKey, children: new Map(), kind: last ? leafKind : 'dir', count: 0 }
-      node.children.set(part, child)
-    } else if (last) {
-      child.kind = leafKind
-    }
-    node = child
-  }
-  return node
-}
-
-function computeCounts(node: TreeNode): number {
-  if (node.children.size === 0) {
-    node.count = node.kind === 'file' ? 1 : 0
-    return node.count
-  }
-  let total = 0
-  for (const child of node.children.values()) total += computeCounts(child)
-  node.count = total
-  return total
-}
-
-async function buildReconstructedTreeChunked(info: PakDatabaseInfo): Promise<TreeNode> {
-  const root = emptyRoot()
-  let ops = 0
-  const step = async (): Promise<void> => {
-    ops += 1
-    if (ops % 500 === 0) await yieldToUi()
-  }
-  const entries = info.paks && info.paks.length > 0
-    ? info.paks
-    : [{ relPakPath: info.relPakPath ?? '', files: info.files ?? [] }]
-  for (const pak of entries) {
-    const rel = (pak.relPakPath ?? '').trim().replace(/\\/g, '/')
-    const relParts = splitRel(rel)
-    if (relParts.length === 0) continue
-    const pakNode = ensureNode(root, '', relParts, 'file')
-    await step()
-    for (const file of pak.files ?? []) {
-      const fileParts = splitRel(file)
-      if (fileParts.length === 0) continue
-      ensureNode(pakNode, rel, fileParts, 'file')
-      await step()
-    }
-  }
-  computeCounts(root)
-  return root
-}
-
 function defaultExpanded(root: TreeNode): Set<string> {
   const next = new Set<string>()
   for (const child of sortChildren(root)) {
@@ -378,70 +301,24 @@ function defaultExpanded(root: TreeNode): Set<string> {
   return next
 }
 
-function slimDatabaseInfo(info: PakDatabaseInfo): PakDatabaseInfo {
-  const paks = info.paks?.map((pak) => ({
-    relPakPath: pak.relPakPath,
-    destDir: pak.destDir,
-    files: [] as string[],
-    fileCount: pak.fileCount ?? pak.files.length,
-  }))
-  return { ...info, files: [], paks }
-}
-
 async function loadDatabase(dbPath: string): Promise<void> {
   const id = ++requestId.value
-  const cacheKey = structureCacheKey('db', dbPath)
   loading.value = true
-  building.value = false
+  building.value = true
   error.value = ''
   dbInfo.value = null
   cancelSearch()
   setIndex(null)
-  treeRoot.value = emptyRoot()
+  treeRoot.value = emptyDbRoot()
   expanded.value = new Set()
   try {
-    let stamp = ''
-    try {
-      const stampResult = await electron.sourceStamp(dbPath, 'database', state.customDirs.unpaked || undefined)
-      if (id !== requestId.value) return
-      if (stampResult.success && typeof stampResult.mtimeMs === 'number') {
-        stamp = structureStamp(stampResult.mtimeMs, stampResult.size ?? 0)
-      }
-    } catch {
-      stamp = ''
-    }
-    const usableStamp = stamp || 'session'
-    const cached = readStructureCache<TreeNode, PakDatabaseInfo>(cacheKey, usableStamp)
-    if (cached) {
-      dbInfo.value = cached.meta
-      setIndex(cached.index)
-      treeRoot.value = cached.root
-      expanded.value = defaultExpanded(cached.root)
-      return
-    }
-    const result = await electron.readPakDatabase(dbPath, state.customDirs.unpaked || undefined)
+    const cached = await warmDatabaseCache(dbPath, state.customDirs.unpaked || undefined, electron)
     if (id !== requestId.value) return
-    if (!result.success || !result.info) {
-      error.value = t('db.readFail', { error: result.error })
-      return
-    }
-    const info = result.info
-    loading.value = false
-    building.value = true
-    const root = await buildReconstructedTreeChunked(info)
-    if (id !== requestId.value) return
-    const indexed = await buildFileTreeIndex(root, {
-      isDir: isSearchDir,
-      onYield: yieldToUi,
-      isCancelled: () => id !== requestId.value,
-    })
-    if (!indexed || id !== requestId.value) return
-    const slim = slimDatabaseInfo(info)
-    dbInfo.value = slim
-    setIndex(indexed)
-    treeRoot.value = markRaw(root)
-    expanded.value = defaultExpanded(root)
-    writeStructureCache(cacheKey, usableStamp, treeRoot.value, indexed, slim)
+    if (!cached) return
+    dbInfo.value = cached.meta
+    setIndex(cached.index)
+    treeRoot.value = cached.root
+    expanded.value = defaultExpanded(cached.root)
   } catch (err) {
     if (id !== requestId.value) return
     error.value = t('db.readFail', { error: err instanceof Error ? err.message : String(err) })
@@ -531,7 +408,7 @@ watch(
       dbInfo.value = null
       cancelSearch()
       setIndex(null)
-      treeRoot.value = emptyRoot()
+      treeRoot.value = emptyDbRoot()
       expanded.value = new Set()
       selectedExpanded.value = new Set()
       expandingKey.value = null
@@ -544,7 +421,7 @@ watch(
     } else {
       cancelSearch()
       setIndex(null)
-      treeRoot.value = emptyRoot()
+      treeRoot.value = emptyDbRoot()
       expanded.value = new Set()
       window.removeEventListener('keydown', onKeydown)
     }

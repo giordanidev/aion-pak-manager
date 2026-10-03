@@ -4,6 +4,7 @@ import { useI18n } from 'vue-i18n'
 import type { ExtractFolderPayload, OperationFailure, PakEntry } from '../../shared/api-types'
 import { getShowFileNames, useElectron } from '../composables/useElectron'
 import { useAppState, basename, truncateMiddle, formatBytes, type LogPart } from '../composables/useAppState'
+import { warmDatabaseCache } from '../lib/warm-database-cache'
 import PakContentsModal from './PakContentsModal.vue'
 import ConfirmModal from './ConfirmModal.vue'
 
@@ -142,6 +143,9 @@ async function unpackSelected(): Promise<void> {
         setSummary(result.error || t('pak.extractFailed'), 'error')
         logI18n('pak.extractFailedLog', { error: result.error }, 'error')
         break
+      }
+      for (const dbPath of result.results?.dbPaths ?? []) {
+        void warmDatabaseCache(dbPath, state.customDirs.unpaked || undefined, electron).catch(() => undefined)
       }
       const extracted = result.results?.paksExtracted ?? 0
       const copied = result.results?.otherFilesCopied ?? 0
