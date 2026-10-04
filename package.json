@@ -72,7 +72,9 @@
 			".build/backend/workers/**/*",
 			".build/backend/chunks/**/*",
 			"node_modules/piscina/**",
-			"node_modules/better-sqlite3/**"
+			"node_modules/better-sqlite3/**",
+			"node_modules/bindings/**",
+			"node_modules/file-uri-to-path/**"
 		],
 		"win": {
 			"icon": "frontend/assets/icon.ico",
