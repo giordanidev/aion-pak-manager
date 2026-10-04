@@ -3,7 +3,7 @@
  * New files are SQLite with the folder tree and an FTS5 trigram index on
  * each path segment, written in the same pass as the rows.
  */
-import { closeSync, existsSync, openSync, readFileSync, readSync, renameSync, rmSync } from 'fs'
+import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync } from 'fs'
 import path from 'path'
 import Database from 'better-sqlite3'
 import type { DbOpenResult, DbPrefetch, DbTreeRow, PakDatabaseInfo, PakDatabasePakEntry } from '../../shared/api-types'
@@ -28,6 +28,8 @@ export interface PakDbManifest {
 	destDir?: string
 	files: string[]
 	paks: PakDbFileEntry[]
+	/** Non-pak files mirrored during extract, relative to the unpaked root. */
+	movedFiles?: string[]
 }
 
 const SQLITE_MAGIC = 'SQLite format 3'
@@ -103,6 +105,9 @@ export function manifestFromUnknown(raw: Record<string, unknown>): PakDbManifest
 	const files = Array.isArray(raw['files'])
 		? (raw['files'] as unknown[]).filter((file): file is string => typeof file === 'string')
 		: []
+	const movedFiles = Array.isArray(raw['movedFiles'])
+		? (raw['movedFiles'] as unknown[]).filter((file): file is string => typeof file === 'string')
+		: []
 	return {
 		version: typeof raw['version'] === 'number' ? raw['version'] : undefined,
 		folderName: asString(raw['folderName']),
@@ -114,6 +119,7 @@ export function manifestFromUnknown(raw: Record<string, unknown>): PakDbManifest
 		destDir: asString(raw['destDir']),
 		files,
 		paks,
+		movedFiles,
 	}
 }
 
@@ -129,6 +135,7 @@ function manifestRecord(manifest: PakDbManifest): Record<string, unknown> {
 	if (manifest.destDir !== undefined) record['destDir'] = manifest.destDir
 	if (manifest.paks.length > 0) record['paks'] = manifest.paks
 	if (manifest.paks.length <= 1) record['files'] = manifest.paks.length === 1 ? manifest.paks[0]!.files : manifest.files
+	if (manifest.movedFiles && manifest.movedFiles.length > 0) record['movedFiles'] = manifest.movedFiles
 	return record
 }
 
@@ -232,6 +239,7 @@ function createSchema(db: Database.Database): void {
 			pak_id INTEGER,
 			rel_file TEXT
 		);
+		CREATE TABLE moved_files (path TEXT PRIMARY KEY);
 		CREATE VIRTUAL TABLE nodes_fts USING fts5(
 			name_fold,
 			content='nodes',
@@ -346,6 +354,11 @@ export function writePakDatabase(destPath: string, manifest: PakDbManifest): voi
 				}
 			}
 			walk(root, 0)
+			const moved = normalizeMovedFiles(manifest.movedFiles)
+			if (moved.length > 0) {
+				const insertMoved = db.prepare('INSERT INTO moved_files (path) VALUES (?)')
+				for (const rel of moved) insertMoved.run(rel)
+			}
 			db.exec('CREATE INDEX nodes_parent_ord ON nodes(parent_id, ord)')
 			db.exec('CREATE INDEX nodes_pak_rel ON nodes(pak_id, rel_file) WHERE rel_file IS NOT NULL')
 			db.exec(`INSERT INTO nodes_fts(nodes_fts) VALUES('rebuild')`)
@@ -415,7 +428,132 @@ function manifestFromSqlite(db: Database.Database): PakDbManifest {
 		destDir: meta.has('dest_dir') ? meta.get('dest_dir') : undefined,
 		files: [],
 		paks: readPakRows(db),
+		movedFiles: readMovedFiles(db),
 	}
+}
+
+function cleanRel(raw: string): string {
+	const rel = raw.replace(/\\/g, '/').replace(/\/+/g, '/').replace(/^\/+/, '').replace(/\/+$/, '')
+	if (rel === '' || rel.split('/').some((seg) => seg === '' || seg === '.' || seg === '..')) return ''
+	return rel
+}
+
+function normalizeMovedFiles(files: string[] | undefined): string[] {
+	if (!files || files.length === 0) return []
+	const seen = new Set<string>()
+	const out: string[] = []
+	for (const raw of files) {
+		const rel = cleanRel(raw)
+		if (rel === '' || seen.has(rel)) continue
+		seen.add(rel)
+		out.push(rel)
+	}
+	out.sort()
+	return out
+}
+
+/** v4 db lives inside the extract folder; the legacy aggregate db sits beside it. */
+function extractLayout(dbPath: string): { extractRoot: string; unpakedRoot: string } | null {
+	const resolved = path.resolve(dbPath)
+	const base = path.basename(resolved)
+	if (!base.toLowerCase().endsWith('.db')) return null
+	const stem = base.slice(0, -3)
+	const parent = path.dirname(resolved)
+	if (path.basename(parent) === stem && existsSync(parent)) {
+		return { extractRoot: parent, unpakedRoot: path.dirname(parent) }
+	}
+	const sibling = path.join(parent, stem)
+	try {
+		if (statSync(sibling).isDirectory()) return { extractRoot: sibling, unpakedRoot: parent }
+	} catch {
+		// no sibling extract folder
+	}
+	return null
+}
+
+function pakOwnedRelPaths(manifest: PakDbManifest, unpakedRoot: string): Set<string> {
+	const owned = new Set<string>()
+	const entries: PakDbFileEntry[] = manifest.paks.length > 0
+		? manifest.paks
+		: manifest.relPakPath
+			? [{
+				relPakPath: manifest.relPakPath,
+				sourcePak: manifest.sourcePak,
+				outputFolder: manifest.outputFolder,
+				destDir: manifest.destDir,
+				files: manifest.files,
+			}]
+			: []
+	for (const entry of entries) {
+		let base = ''
+		if (typeof entry.destDir === 'string') {
+			base = cleanRel(entry.destDir)
+		} else if (entry.outputFolder) {
+			const rel = path.relative(unpakedRoot, path.resolve(entry.outputFolder))
+			if (rel.startsWith('..') || path.isAbsolute(rel)) continue
+			base = cleanRel(rel.split(path.sep).join('/'))
+		}
+		for (const file of entry.files) {
+			const relFile = cleanRel(file)
+			if (relFile === '') continue
+			owned.add(base ? `${base}/${relFile}` : relFile)
+		}
+	}
+	return owned
+}
+
+/**
+ * Files in the extract folder that did not come from a pak TOC.
+ * `.pak` archives are skipped; everything else not listed in the manifest
+ * is a copied/moved file and belongs in `movedFiles`.
+ */
+function findCopiedFiles(dbPath: string, manifest: PakDbManifest): string[] {
+	const layout = extractLayout(dbPath)
+	if (!layout) return []
+	const owned = pakOwnedRelPaths(manifest, layout.unpakedRoot)
+	const dbResolved = path.resolve(dbPath)
+	const found: string[] = []
+	const walk = (dir: string): void => {
+		let names: string[]
+		try {
+			names = readdirSync(dir)
+		} catch {
+			return
+		}
+		for (const name of names) {
+			const full = path.join(dir, name)
+			let st: ReturnType<typeof statSync>
+			try {
+				st = statSync(full)
+			} catch {
+				continue
+			}
+			if (st.isDirectory()) {
+				walk(full)
+				continue
+			}
+			if (!st.isFile()) continue
+			const resolved = path.resolve(full)
+			if (resolved === dbResolved || resolved === `${dbResolved}.bak` || resolved === `${dbResolved}.tmp`) continue
+			if (path.extname(name).toLowerCase() === '.pak') continue
+			const rel = path.relative(layout.unpakedRoot, resolved)
+			if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) continue
+			const posix = cleanRel(rel.split(path.sep).join('/'))
+			if (posix === '' || owned.has(posix)) continue
+			found.push(posix)
+		}
+	}
+	walk(layout.extractRoot)
+	return found
+}
+
+function readMovedFiles(db: Database.Database): string[] {
+	const table = db.prepare(
+		`SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'moved_files'`,
+	).get() as { ok: number } | undefined
+	if (!table) return []
+	const rows = db.prepare(`SELECT path FROM moved_files ORDER BY path`).all() as { path: string }[]
+	return rows.map((row) => row.path)
 }
 
 export function readStoredRelPakPath(filePath: string): string | null {
@@ -631,7 +769,10 @@ export function openPakDatabase(filePath: string): DbOpenResult {
 			return { success: false, error: error instanceof Error ? error.message : String(error) }
 		}
 		try {
-			writePakDatabase(filePath, manifestFromUnknown(raw))
+			const manifest = manifestFromUnknown(raw)
+			const copied = findCopiedFiles(filePath, manifest)
+			if (copied.length > 0) manifest.movedFiles = [...(manifest.movedFiles ?? []), ...copied]
+			writePakDatabase(filePath, manifest)
 			migrated = true
 		} catch (error) {
 			return { success: false, fallback: true, error: error instanceof Error ? error.message : String(error) }

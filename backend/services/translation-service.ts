@@ -517,14 +517,74 @@ function normalizePakEntry(value: unknown): AggregatedPakEntry | null {
  * to the legacy sibling location (`<selection>.db`). Returns `null` when absent
  * or when it is a legacy single-pak DB.
  */
+async function readAggregateDb(
+	selectionAbs: string,
+	unpakedRoot: string = UNPAKED_DIR,
+): Promise<{ paks: AggregatedPakEntry[]; movedFiles: string[] } | null> {
+	const raw = (await readJsonFile(unpakedRootDbForFolder(selectionAbs, unpakedRoot)))
+		?? (await readJsonFile(unpakedLegacyRootDbForFolder(selectionAbs, unpakedRoot)))
+	if (!raw || !Array.isArray(raw['paks'])) return null
+	const paks = (raw['paks'] as unknown[]).map(normalizePakEntry).filter((e): e is AggregatedPakEntry => e !== null)
+	const movedFiles = Array.isArray(raw['movedFiles'])
+		? (raw['movedFiles'] as unknown[]).filter((file): file is string => typeof file === 'string')
+		: []
+	return { paks, movedFiles }
+}
+
 async function readAggregatedPakEntries(
 	selectionAbs: string,
 	unpakedRoot: string = UNPAKED_DIR,
 ): Promise<AggregatedPakEntry[] | null> {
-	const raw = (await readJsonFile(unpakedRootDbForFolder(selectionAbs, unpakedRoot)))
-		?? (await readJsonFile(unpakedLegacyRootDbForFolder(selectionAbs, unpakedRoot)))
-	if (!raw || !Array.isArray(raw['paks'])) return null
-	return (raw['paks'] as unknown[]).map(normalizePakEntry).filter((e): e is AggregatedPakEntry => e !== null)
+	const db = await readAggregateDb(selectionAbs, unpakedRoot)
+	return db ? db.paks : null
+}
+
+/** Copy extract-mirrored files (not inside any pak) onto the RePAK root. */
+async function copyMovedFilesToRepak(
+	movedFiles: string[],
+	unpakedRoot: string,
+	repakedRoot: string,
+	folderName: string,
+	onProgress: ProgressCallback | undefined,
+	signal: AbortSignal | undefined,
+): Promise<{ folderName: string; translationName: string; pak: string; error: string }[]> {
+	const failed: { folderName: string; translationName: string; pak: string; error: string }[] = []
+	const unpakedResolved = path.resolve(unpakedRoot)
+	const repakedResolved = path.resolve(repakedRoot)
+	await mapPool(
+		movedFiles,
+		Math.min(cpuConcurrency(), Math.max(movedFiles.length, 1)),
+		async (raw) => {
+			abortIfCanceled(signal)
+			const rel = toPosix(raw).replace(/\/+/g, '/').replace(/^\/+/, '').replace(/\/+$/, '')
+			if (rel === '' || isUnsafeRelPath(rel)) {
+				failed.push({ folderName, translationName: folderName, pak: raw, error: `Unsafe moved path in DB: ${raw}` })
+				return
+			}
+			const src = path.resolve(unpakedResolved, ...rel.split('/'))
+			const dest = path.resolve(repakedResolved, ...rel.split('/'))
+			if (!isSubPath(unpakedResolved, src) || !isSubPath(repakedResolved, dest)) {
+				failed.push({ folderName, translationName: folderName, pak: rel, error: `Unsafe moved path in DB: ${rel}` })
+				return
+			}
+			try {
+				await fsp.access(src)
+			} catch {
+				failed.push({ folderName, translationName: folderName, pak: rel, error: `Moved file not found: ${rel}` })
+				return
+			}
+			await ensureDir(path.dirname(dest))
+			await fsp.copyFile(src, dest)
+			onProgress?.({
+				stage: 'repak',
+				fileName: rel,
+				message: `Copying ${rel}`,
+				packageName: path.basename(rel),
+			})
+		},
+		signal,
+	)
+	return failed
 }
 
 /**
@@ -537,7 +597,8 @@ async function readAggregatedPakEntries(
  * pak TOC). Every path is rooted
  * at `<basename(input)>` — identical to the old layout for first-level folders
  * under /PAKS/pak, consistent for custom/nested inputs. Optional non-pak files
- * mirror under the same root. Skip is keyed by the DB manifest (`!overwrite`),
+ * mirror under the same root and are recorded as `movedFiles` so RePAK copies
+ * them beside the reconstructed paks. Skip is keyed by the DB manifest (`!overwrite`),
  * not by on-disk wrappers; legacy wrappers/sibling `*.db` files are removed
  * after a pak is re-extracted / after the root DB is written. Multiple paks
  * extract in parallel via UnPAK workers; global progress is monotonic and based
@@ -908,6 +969,7 @@ export async function extractFolder(
 			createdAt: new Date().toISOString(),
 			files: [],
 			paks: mergedPaks,
+			movedFiles: otherFiles.map((filePath) => relToUnpaked(filePath)),
 		}
 		await writePakDatabaseOffThread(rootDbPath, manifest)
 		dbPaths.push(rootDbPath)
@@ -1237,7 +1299,8 @@ export async function repackTranslations(
 				// reconstruction from the `paks[]` manifest. Without it, legacy
 				// `*.pak/` wrapper trees (per-pak `<name>.pak.db` siblings) also
 				// reconstruct per-pak; any other folder is repacked as one simple pak.
-				const aggregatedEntries = await readAggregatedPakEntries(selectionAbs, unpakedRoot)
+				const aggregate = await readAggregateDb(selectionAbs, unpakedRoot)
+				const aggregatedEntries = aggregate ? aggregate.paks : null
 				const hasAggregateDb = aggregatedEntries !== null && aggregatedEntries.length > 0
 				const pakDirs = hasAggregateDb ? [] : await collectPakDirs(selectionAbs, options.signal)
 
@@ -1353,6 +1416,17 @@ export async function repackTranslations(
 						} catch (error) {
 							localFailed.push({ folderName, translationName: folderName, pak: relPakPath, error: errorMessage(error) })
 						}
+					}
+					if (aggregate && aggregate.movedFiles.length > 0) {
+						const copyFailures = await copyMovedFilesToRepak(
+							aggregate.movedFiles,
+							unpakedRoot,
+							repakedRoot,
+							folderName,
+							wrapRepakProgress(),
+							options.signal,
+						)
+						for (const failure of copyFailures) localFailed.push(failure)
 					}
 				} else {
 					// Legacy fallback: no aggregate entries — per-pak `*.pak/` wrappers
