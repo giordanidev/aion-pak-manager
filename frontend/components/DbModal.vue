@@ -1,13 +1,14 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, shallowRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import type { PakDatabaseInfo } from '../../shared/api-types'
+import type { DbTreeRow, PakDatabaseInfo } from '../../shared/api-types'
 import { getShowFileNames, useElectron } from '../composables/useElectron'
 import { useAppState } from '../composables/useAppState'
 import { useIndexedTreeSearch } from '../composables/useIndexedTreeSearch'
+import { useSqliteDbTree, type SqliteWindowItem } from '../composables/useSqliteDbTree'
 import { useVirtualWindow } from '../composables/useVirtualWindow'
 import { emptyDbRoot, isDbSearchDir, type DbTreeNode } from '../lib/pak-database-tree'
-import { warmDatabaseCache } from '../lib/warm-database-cache'
+import { warmDatabaseCache, type SqliteWarm } from '../lib/warm-database-cache'
 
 const props = defineProps<{ open: boolean; initialDbPath?: string | null; folderPath?: string | null }>()
 const emit = defineEmits<{ (e: 'close'): void; (e: 'done'): void }>()
@@ -37,7 +38,8 @@ interface VisibleRow {
   expandable: boolean
   expanded: boolean
   count: number
-  node: TreeNode
+  node?: TreeNode
+  sqlite?: DbTreeRow
 }
 
 interface SelectedRow {
@@ -52,6 +54,9 @@ interface SelectedRow {
 const treeRoot = shallowRef<TreeNode>(emptyDbRoot())
 const expanded = ref<Set<string>>(new Set())
 const selectedExpanded = ref<Set<string>>(new Set())
+const sqliteEnabled = ref(false)
+const activeDbPath = ref('')
+const dbBase = computed(() => state.customDirs.unpaked || undefined)
 
 function toVisibleRow(node: TreeNode, depth: number, isOpen: boolean, _mode: 'browse' | 'search'): VisibleRow {
   const expandable = node.children.size > 0
@@ -68,9 +73,9 @@ function toVisibleRow(node: TreeNode, depth: number, isOpen: boolean, _mode: 'br
 }
 
 const {
-  searchBusy,
-  listCount: leftCount,
-  rowsForWindow,
+  searchBusy: legacySearchBusy,
+  listCount: legacyCount,
+  rowsForWindow: legacyRows,
   setIndex,
   cancelSearch,
 } = useIndexedTreeSearch<TreeNode, VisibleRow>({
@@ -80,6 +85,28 @@ const {
   isDir: isDbSearchDir,
   toRow: toVisibleRow,
 })
+
+const {
+  searchBusy: sqliteSearchBusy,
+  listCount: sqliteCount,
+  rowsForWindow: sqliteRows,
+  ensureWindow,
+  revision: sqliteRevision,
+  applyOpen,
+  toggle: toggleSqlite,
+  reset: resetSqlite,
+  cancel: cancelSqlite,
+} = useSqliteDbTree({
+  client: electron,
+  dbPath: activeDbPath,
+  base: dbBase,
+  expanded,
+  searchQuery,
+  enabled: sqliteEnabled,
+})
+
+const searchBusy = computed(() => (sqliteEnabled.value ? sqliteSearchBusy.value : legacySearchBusy.value))
+const leftCount = computed(() => (sqliteEnabled.value ? sqliteCount.value : legacyCount.value))
 
 function sortChildren(node: TreeNode): TreeNode[] {
   return [...node.children.values()].sort((a, b) => {
@@ -118,10 +145,37 @@ const {
   rowTop: leftRowTop,
   scrollToTop: scrollLeftToTop,
 } = useVirtualWindow(leftCount)
-const windowedRows = computed(() => rowsForWindow(leftStart.value, leftEnd.value))
+
+function sqliteVisible(item: SqliteWindowItem): VisibleRow {
+  const row = item.row
+  return {
+    key: row.path,
+    name: row.name,
+    depth: item.depth,
+    isDir: row.kind === 'dir',
+    expandable: row.childCount > 0,
+    expanded: item.expanded,
+    count: row.fileCount,
+    sqlite: row,
+  }
+}
+
+const windowedRows = computed(() => {
+  if (sqliteEnabled.value) {
+    return sqliteRows(leftStart.value, leftEnd.value).map((item) => ({
+      row: sqliteVisible(item),
+      index: item.index,
+    }))
+  }
+  return legacyRows(leftStart.value, leftEnd.value)
+})
 
 watch(searchQuery, () => {
   scrollLeftToTop()
+})
+
+watch([leftStart, leftEnd, sqliteEnabled, searchQuery, sqliteRevision], () => {
+  if (sqliteEnabled.value) ensureWindow(leftStart.value, leftEnd.value)
 })
 
 const selectedTree = computed<TreeNode>(() => {
@@ -231,8 +285,16 @@ function fileExt(name: string): string {
   return ext.length > 4 ? ext.slice(0, 4) : ext
 }
 
-function toggleNode(key: string): void {
+function toggleNode(row: VisibleRow): void {
   if (state.actionRunning || expandingKey.value) return
+  if (row.sqlite && sqliteEnabled.value) {
+    expandingKey.value = row.key
+    void toggleSqlite(row.sqlite).finally(() => {
+      if (expandingKey.value === row.key) expandingKey.value = null
+    })
+    return
+  }
+  const key = row.key
   if (expanded.value.has(key)) {
     const next = new Set(expanded.value)
     next.delete(key)
@@ -274,9 +336,29 @@ function removeFile(file: string): void {
   selected.value = selected.value.filter((entry) => entry !== file)
 }
 
-function addFolder(node: TreeNode): void {
+function addFolder(row: VisibleRow): void {
   if (state.actionRunning) return
-  const additions = collectLeafFiles(node).filter((file) => !isSelected(file))
+  if (row.sqlite) {
+    const nodePath = row.sqlite.path
+    void electron.dbLeaves(activeDbPath.value, nodePath, dbBase.value).then((result) => {
+      if (!result.success || !result.paths) return
+      const have = new Set(selected.value)
+      const extra = result.paths.filter((file) => !have.has(file))
+      const chunk = 4000
+      let index = 0
+      const append = (): void => {
+        const slice = extra.slice(index, index + chunk)
+        index += chunk
+        if (slice.length === 0) return
+        selected.value = selected.value.concat(slice)
+        if (index < extra.length) setTimeout(append, 0)
+      }
+      append()
+    })
+    return
+  }
+  if (!row.node) return
+  const additions = collectLeafFiles(row.node).filter((file) => !isSelected(file))
   if (additions.length === 0) return
   selected.value = [...selected.value, ...additions]
 }
@@ -289,8 +371,17 @@ function removeFolder(node: TreeNode): void {
 
 function onRowClick(row: VisibleRow): void {
   if (state.actionRunning) return
-  if (row.expandable) toggleNode(row.key)
+  if (row.expandable) toggleNode(row)
   else addFile(row.key)
+}
+
+function expandedFromSqlite(slot: SqliteWarm): Set<string> {
+  const prefetched = new Set(slot.prefetch.map((batch) => batch.parentId))
+  const next = new Set<string>()
+  for (const row of slot.rootRows) {
+    if (row.childCount > 0 && prefetched.has(row.id)) next.add(row.path)
+  }
+  return next
 }
 
 function defaultExpanded(root: TreeNode): Set<string> {
@@ -308,14 +399,24 @@ async function loadDatabase(dbPath: string): Promise<void> {
   error.value = ''
   dbInfo.value = null
   cancelSearch()
+  cancelSqlite()
   setIndex(null)
+  resetSqlite()
+  sqliteEnabled.value = false
+  activeDbPath.value = dbPath
   treeRoot.value = emptyDbRoot()
   expanded.value = new Set()
   try {
     const cached = await warmDatabaseCache(dbPath, state.customDirs.unpaked || undefined, electron)
     if (id !== requestId.value) return
     if (!cached) return
-    dbInfo.value = cached.meta
+    dbInfo.value = cached.info
+    if (cached.kind === 'sqlite') {
+      sqliteEnabled.value = true
+      applyOpen({ success: true, info: cached.info, root: cached.rootRows, prefetch: cached.prefetch })
+      expanded.value = expandedFromSqlite(cached)
+      return
+    }
     setIndex(cached.index)
     treeRoot.value = cached.root
     expanded.value = defaultExpanded(cached.root)
@@ -407,6 +508,9 @@ watch(
       error.value = ''
       dbInfo.value = null
       cancelSearch()
+      cancelSqlite()
+      resetSqlite()
+      sqliteEnabled.value = false
       setIndex(null)
       treeRoot.value = emptyDbRoot()
       expanded.value = new Set()
@@ -420,6 +524,9 @@ watch(
       window.addEventListener('keydown', onKeydown)
     } else {
       cancelSearch()
+      cancelSqlite()
+      resetSqlite()
+      sqliteEnabled.value = false
       setIndex(null)
       treeRoot.value = emptyDbRoot()
       expanded.value = new Set()
@@ -505,7 +612,7 @@ onBeforeUnmount(() => {
                   class="inline-flex h-[18px] w-[18px] min-w-[18px] flex-none items-center justify-center rounded border border-border bg-transparent p-0 text-[15px] font-bold leading-none text-text cursor-pointer transition duration-150 enabled:hover:bg-hover"
                   :title="t('pak.toggleFolderHint')"
                   :disabled="state.actionRunning || expandingKey !== null"
-                  @click.stop="toggleNode(item.row.key)"
+                  @click.stop="toggleNode(item.row)"
                 >
                   <span v-if="expandingKey === item.row.key" class="inline-block h-2.5 w-2.5 animate-spin rounded-full border-2 border-white/35 border-t-white"></span>
                   <template v-else>{{ item.row.expanded ? '−' : '+' }}</template>
@@ -523,7 +630,7 @@ onBeforeUnmount(() => {
                   class="ml-1 inline-flex h-[18px] w-[18px] min-w-[18px] flex-none items-center justify-center rounded border-none bg-transparent p-0 text-[13px] leading-none text-dim cursor-pointer enabled:hover:bg-accent/20 enabled:hover:text-bright"
                   :title="t('pak.addFolderHint')"
                   :disabled="state.actionRunning"
-                  @click.stop="addFolder(item.row.node)"
+                  @click.stop="addFolder(item.row)"
                 >&#8594;</button>
                 <span v-else class="w-[18px] flex-none"></span>
               </div>

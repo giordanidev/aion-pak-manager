@@ -47,7 +47,8 @@ export default defineConfig({
           'workers/repak-task': resolve(__dirname, 'backend/workers/repak-task.ts'),
           'workers/count-task': resolve(__dirname, 'backend/workers/count-task.ts'),
           'workers/scan-folder-task': resolve(__dirname, 'backend/workers/scan-folder-task.ts'),
-          'workers/pak-scan-task': resolve(__dirname, 'backend/workers/pak-scan-task.ts')
+          'workers/pak-scan-task': resolve(__dirname, 'backend/workers/pak-scan-task.ts'),
+          'workers/db-task': resolve(__dirname, 'backend/workers/db-task.ts')
         }
       }
     }

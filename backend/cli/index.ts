@@ -1,6 +1,6 @@
 // Standalone CLI entry (built to .build/backend/cli.js).
 //
-//   node .build/backend/cli.js <command> [args]
+//   electron .build/backend/cli.js <command> [args]
 //
 // The packaged app also exposes the same commands via `<app>.exe <command>`
 // (see backend/index.ts). Logic lives in backend/cli/run.ts.

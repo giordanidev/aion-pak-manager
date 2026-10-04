@@ -48,6 +48,14 @@ import {
 	type ProgressCallback,
 } from '../services/progress'
 import { cancelZipPak } from '../core/repak'
+import { sniffPakDb } from '../core/pak-db'
+import {
+	dbChildrenOffThread,
+	dbLeavesOffThread,
+	dbRowsOffThread,
+	dbSearchOffThread,
+	openPakDatabaseOffThread,
+} from '../services/db-pool'
 import type { AppSettings, ConflictChoice, ExtractConflictRequest, PakDatabasePakEntry } from '../../shared/api-types'
 
 type GetMainWindow = () => BrowserWindow | null
@@ -425,19 +433,27 @@ export function registerIpcHandlers(getMainWindow: GetMainWindow): void {
 		}
 	})
 
+	function assertDatabasePath(payload: unknown): string {
+		const dbPath = isRecord(payload) && typeof payload.dbPath === 'string'
+			? payload.dbPath
+			: typeof payload === 'string' ? payload : ''
+		if (!dbPath) throw new Error('No database path provided')
+		const resolved = path.resolve(dbPath)
+		const allowedBases = [path.resolve(UNPAKED_DIR), ...settingsCustomBases()]
+		const payloadBase = readDirOverride(payload, 'base')
+		if (payloadBase) allowedBases.push(payloadBase)
+		const inside = allowedBases.some((base) => resolved === base || resolved.startsWith(base + path.sep))
+		if (!inside) throw new Error('Access denied: database path outside unpaked directory')
+		return resolved
+	}
+
 	ipcMain.handle('read-pak-database', async (_event, payload) => {
 		try {
-			const dbPath = isRecord(payload) && typeof payload.dbPath === 'string'
-				? payload.dbPath
-				: typeof payload === 'string' ? payload : ''
-			if (!dbPath) throw new Error('No database path provided')
-			const resolved = path.resolve(dbPath)
-			const allowedBases = [path.resolve(UNPAKED_DIR), ...settingsCustomBases()]
-			const payloadBase = readDirOverride(payload, 'base')
-			if (payloadBase) allowedBases.push(payloadBase)
-			const inside = allowedBases.some((base) => resolved === base || resolved.startsWith(base + path.sep))
-			if (!inside) {
-				throw new Error('Access denied: database path outside unpaked directory')
+			const resolved = assertDatabasePath(payload)
+			if (sniffPakDb(resolved) === 'sqlite') {
+				const opened = await openPakDatabaseOffThread(resolved)
+				if (!opened.success || !opened.info) return { success: false, error: opened.error ?? 'empty database' }
+				return { success: true, info: opened.info }
 			}
 			const raw = JSON.parse(await readFile(resolved, 'utf8')) as Record<string, unknown>
 			let files: string[] = []
@@ -492,6 +508,62 @@ export function registerIpcHandlers(getMainWindow: GetMainWindow): void {
 					createdAt: typeof raw['createdAt'] === 'string' ? raw['createdAt'] as string : undefined,
 				},
 			}
+		} catch (error) {
+			return { success: false, error: errorMessage(error) }
+		}
+	})
+
+	ipcMain.handle('db-open', async (_event, payload) => {
+		try {
+			const resolved = assertDatabasePath(payload)
+			return await openPakDatabaseOffThread(resolved)
+		} catch (error) {
+			return { success: false, error: errorMessage(error) }
+		}
+	})
+
+	ipcMain.handle('db-children', async (_event, payload) => {
+		try {
+			const resolved = assertDatabasePath(payload)
+			const parentId = isRecord(payload) && typeof payload.parentId === 'number' ? payload.parentId : 0
+			const rows = await dbChildrenOffThread(resolved, parentId)
+			return { success: true, rows }
+		} catch (error) {
+			return { success: false, error: errorMessage(error) }
+		}
+	})
+
+	ipcMain.handle('db-search', async (_event, payload) => {
+		try {
+			const resolved = assertDatabasePath(payload)
+			const query = isRecord(payload) && typeof payload.query === 'string' ? payload.query : ''
+			const ids = await dbSearchOffThread(resolved, query)
+			return { success: true, ids }
+		} catch (error) {
+			return { success: false, error: errorMessage(error) }
+		}
+	})
+
+	ipcMain.handle('db-rows', async (_event, payload) => {
+		try {
+			const resolved = assertDatabasePath(payload)
+			const ids = isRecord(payload) && Array.isArray(payload.ids)
+				? payload.ids.filter((id): id is number => typeof id === 'number').slice(0, 500)
+				: []
+			const rows = await dbRowsOffThread(resolved, ids)
+			return { success: true, rows }
+		} catch (error) {
+			return { success: false, error: errorMessage(error) }
+		}
+	})
+
+	ipcMain.handle('db-leaves', async (_event, payload) => {
+		try {
+			const resolved = assertDatabasePath(payload)
+			const nodePath = isRecord(payload) && typeof payload.nodePath === 'string' ? payload.nodePath : ''
+			if (!nodePath) throw new Error('No path provided')
+			const paths = await dbLeavesOffThread(resolved, nodePath)
+			return { success: true, paths }
 		} catch (error) {
 			return { success: false, error: errorMessage(error) }
 		}

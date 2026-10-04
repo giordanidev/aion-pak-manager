@@ -9,8 +9,8 @@ import { fileURLToPath } from 'url'
 import { build } from 'vite'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const workers = ['decrypt-task', 'unpak-task', 'repak-task', 'count-task', 'scan-folder-task', 'pak-scan-task']
-const externals = [...builtinModules, ...builtinModules.map((m) => `node:${m}`)]
+const workers = ['decrypt-task', 'unpak-task', 'repak-task', 'count-task', 'scan-folder-task', 'pak-scan-task', 'db-task']
+const externals = [...builtinModules, ...builtinModules.map((m) => `node:${m}`), 'better-sqlite3']
 
 for (const name of workers) {
 	await build({

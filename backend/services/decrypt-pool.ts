@@ -105,6 +105,10 @@ export function resolvePakScanWorkerFile(): string {
 	return resolveWorkerFile('pak-scan-task')
 }
 
+export function resolveDbWorkerFile(): string {
+	return resolveWorkerFile('db-task')
+}
+
 export function createDecryptPool(): Piscina<DecryptTaskInput | string[], DecryptTaskResult> {
 	return new Piscina({
 		filename: resolveDecryptWorkerFile(),

@@ -113,7 +113,7 @@ function createWindow(): void {
 }
 
 // Packaged app: `<app>.exe <command>` runs headless (no window). A legacy
-// `cli` prefix is still accepted. In development use `node .build/backend/cli.js`.
+// `cli` prefix is still accepted. In development use `electron .build/backend/cli.js`.
 const CLI_COMMANDS = new Set(['unpak', 'repak', 'decrypt', 'help', '-h', '--help'])
 
 function resolvePackagedCliArgs(argv: string[]): string[] | null {

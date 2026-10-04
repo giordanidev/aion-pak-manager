@@ -37,6 +37,33 @@ flavor_for_distro() {
   esac
 }
 
+# g++/python3 so a reserva do better-sqlite3 compila quando não há prebuild do Electron.
+ensure_native_toolchain() {
+  if command -v g++ >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+    return 0
+  fi
+  log "A instalar compilador C++ para better-sqlite3…"
+  run_as_root() {
+    if [[ "$(id -u)" -eq 0 ]]; then
+      "$@"
+    else
+      sudo "$@"
+    fi
+  }
+  case "$(distro_id)" in
+    ubuntu | debian | pop | linuxmint | zorin)
+      run_as_root apt-get update
+      run_as_root apt-get install -y build-essential python3
+      ;;
+    fedora | rhel | centos | rocky | almalinux)
+      run_as_root dnf install -y gcc-c++ make python3
+      ;;
+    *)
+      die "Instale g++ e python3 para compilar better-sqlite3."
+      ;;
+  esac
+}
+
 # Alvos por omissão: instalação nativa da distro (o AppImage é opcional).
 default_targets() {
   case "$(distro_id)" in

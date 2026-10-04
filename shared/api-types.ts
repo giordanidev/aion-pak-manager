@@ -138,6 +138,31 @@ export interface ReadPakDatabaseResult {
 	error?: string;
 }
 
+export interface DbTreeRow {
+	id: number;
+	parentId: number;
+	name: string;
+	path: string;
+	kind: 'dir' | 'file';
+	childCount: number;
+	fileCount: number;
+}
+
+export interface DbPrefetch {
+	parentId: number;
+	rows: DbTreeRow[];
+}
+
+export interface DbOpenResult {
+	success: boolean;
+	migrated?: boolean;
+	fallback?: boolean;
+	error?: string;
+	info?: PakDatabaseInfo;
+	root?: DbTreeRow[];
+	prefetch?: DbPrefetch[];
+}
+
 export interface ProgressPayload {
 	stage: string;
 	packageName?: string;
@@ -375,6 +400,11 @@ export interface ElectronApi {
 	openFolder(dir: string): Promise<OpenFolderResult>;
 	listPakDatabases(unpakedDir?: string): Promise<ListPakDatabasesResult>;
 	readPakDatabase(dbPath: string, base?: string): Promise<ReadPakDatabaseResult>;
+	dbOpen(dbPath: string, base?: string): Promise<DbOpenResult>;
+	dbChildren(dbPath: string, parentId: number, base?: string): Promise<{ success: boolean; rows?: DbTreeRow[]; error?: string }>;
+	dbSearch(dbPath: string, query: string, base?: string): Promise<{ success: boolean; ids?: number[]; error?: string }>;
+	dbRows(dbPath: string, ids: number[], base?: string): Promise<{ success: boolean; rows?: DbTreeRow[]; error?: string }>;
+	dbLeaves(dbPath: string, nodePath: string, base?: string): Promise<{ success: boolean; paths?: string[]; error?: string }>;
 	/** mtime + size, so a cached file tree can be reused until the source changes. */
 	sourceStamp(targetPath: string, kind: 'pak' | 'database', base?: string): Promise<SourceStampResult>;
 	getSettings(): Promise<SettingsResult>;

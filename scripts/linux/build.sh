@@ -60,6 +60,7 @@ rsync -a --delete \
 
 # --- 2) Dependências ---------------------------------------------------------
 cd "$WORK"
+ensure_native_toolchain
 if [[ "$SKIP_INSTALL" -eq 0 ]]; then
   LOCK_HASH="$(sha1sum package-lock.json | cut -d' ' -f1)"
   MARKER="node_modules/.install-lock"

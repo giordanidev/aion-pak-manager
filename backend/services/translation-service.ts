@@ -17,6 +17,8 @@ import { mapPool, cpuConcurrency } from './parallel'
 import { cpuThreadsForWork, innerConcurrency, workerResourceLimits } from './threads'
 import { peekPakKind, type PakFileKind, type PakScanResult } from '../core/unpak'
 import { scanPakOffThread } from './pak-scan-pool'
+import { readPakManifestOffThread, writePakDatabaseOffThread } from './db-pool'
+import type { PakDbManifest } from '../core/pak-db'
 import type { ScanFolderTaskInput, ScanFolderTaskResult, ScannedPakFile } from '../workers/scan-folder-task'
 import type { UnpakTaskInput, UnpakTaskResult } from '../workers/unpak-task'
 import type { RepakTaskInput, RepakTaskResult } from '../workers/repak-task'
@@ -205,16 +207,10 @@ async function readJsonFile(filePath: string): Promise<Record<string, unknown> |
 		return null
 	}
 	try {
-		const text = await fsp.readFile(filePath, 'utf8')
-		return JSON.parse(text) as Record<string, unknown>
+		return await readPakManifestOffThread(filePath)
 	} catch {
 		return null
 	}
-}
-
-async function writeJsonFile(filePath: string, data: unknown): Promise<void> {
-	await ensureDir(path.dirname(filePath))
-	await fsp.writeFile(filePath, JSON.stringify(data, null, 2), 'utf8')
 }
 
 function isSubPath(parent: string, child: string): boolean {
@@ -904,13 +900,16 @@ export async function extractFolder(
 	const mergedPaks = [...byRelPakPath.values()].sort((a, b) => a.relPakPath.localeCompare(b.relPakPath))
 	const dbPaths: string[] = []
 	if (mergedPaks.length > 0) {
-		await writeJsonFile(rootDbPath, {
+		emitProgress('extract-folder', extractionPercent(doneFiles), path.basename(rootDbPath), `Indexing ${path.basename(rootDbPath)}`)
+		const manifest: PakDbManifest = {
 			version: 4,
 			folderName: path.basename(inputResolved),
 			inputFolder: inputResolved,
 			createdAt: new Date().toISOString(),
+			files: [],
 			paks: mergedPaks,
-		})
+		}
+		await writePakDatabaseOffThread(rootDbPath, manifest)
 		dbPaths.push(rootDbPath)
 		emitProgress('extract-folder', extractionPercent(doneFiles), path.basename(rootDbPath), `Wrote ${path.basename(rootDbPath)}`)
 		// The DB now lives inside the extracted folder; drop the legacy sibling

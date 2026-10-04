@@ -16,6 +16,8 @@ import type {
 	OperationResult,
 	ProgressPayload,
 	ProgressOptions,
+	DbOpenResult,
+	DbTreeRow,
 	ReadPakDatabaseResult,
 	SourceStampResult,
 	RepackUnpakedPayload,
@@ -158,6 +160,21 @@ export function buildElectronApi(): ElectronApi {
 
 		readPakDatabase: (dbPath: string, base?: string): Promise<ReadPakDatabaseResult> =>
 			ipcRenderer.invoke('read-pak-database', toCloneable({ dbPath, base })),
+
+		dbOpen: (dbPath: string, base?: string): Promise<DbOpenResult> =>
+			ipcRenderer.invoke('db-open', toCloneable({ dbPath, base })),
+
+		dbChildren: (dbPath: string, parentId: number, base?: string): Promise<{ success: boolean; rows?: DbTreeRow[]; error?: string }> =>
+			ipcRenderer.invoke('db-children', toCloneable({ dbPath, parentId, base })),
+
+		dbSearch: (dbPath: string, query: string, base?: string): Promise<{ success: boolean; ids?: number[]; error?: string }> =>
+			ipcRenderer.invoke('db-search', toCloneable({ dbPath, query, base })),
+
+		dbRows: (dbPath: string, ids: number[], base?: string): Promise<{ success: boolean; rows?: DbTreeRow[]; error?: string }> =>
+			ipcRenderer.invoke('db-rows', toCloneable({ dbPath, ids, base })),
+
+		dbLeaves: (dbPath: string, nodePath: string, base?: string): Promise<{ success: boolean; paths?: string[]; error?: string }> =>
+			ipcRenderer.invoke('db-leaves', toCloneable({ dbPath, nodePath, base })),
 
 		sourceStamp: (targetPath: string, kind: 'pak' | 'database', base?: string): Promise<SourceStampResult> =>
 			ipcRenderer.invoke('source-stamp', toCloneable({ targetPath, kind, base })),

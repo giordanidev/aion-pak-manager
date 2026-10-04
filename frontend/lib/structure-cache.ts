@@ -2,7 +2,7 @@ import type { FileTreeIndex } from './file-tree-index'
 
 export interface CachedStructure<T extends object, M> {
   root: T
-  index: FileTreeIndex<T>
+  index: FileTreeIndex<T> | null
   meta: M
 }
 
@@ -10,7 +10,7 @@ interface Slot<T extends object, M> {
   key: string
   stamp: string
   root: T
-  index: FileTreeIndex<T>
+  index: FileTreeIndex<T> | null
   meta: M
 }
 
@@ -43,7 +43,7 @@ export function writeStructureCache<T extends object, M>(
   key: string,
   stamp: string,
   root: T,
-  index: FileTreeIndex<T>,
+  index: FileTreeIndex<T> | null,
   meta: M,
 ): void {
   if (!stamp) return

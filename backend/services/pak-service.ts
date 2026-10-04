@@ -13,6 +13,7 @@ import { cpuThreadsForWork, innerConcurrency, workerResourceLimits } from './thr
 import { extractPaksParallel, type UnpakJob } from './unpak-parallel'
 import type { UnpakTaskInput, UnpakTaskResult } from '../workers/unpak-task'
 import type { RepakTaskInput, RepakTaskResult } from '../workers/repak-task'
+import { readStoredRelPakPath } from '../core/pak-db'
 
 export interface PakPackageSuccess {
 	packageName: string;
@@ -104,11 +105,7 @@ async function ensureDirAsync(target: string): Promise<void> {
 async function readDbRelPakPath(dbPath: string): Promise<string | null> {
 	try {
 		if (!(await existsAsync(dbPath))) return null
-		const raw = JSON.parse(await fsp.readFile(dbPath, 'utf8')) as Record<string, unknown>
-		if (typeof raw['relPakPath'] === 'string' && (raw['relPakPath'] as string).length > 0) {
-			return (raw['relPakPath'] as string).split(path.sep).join('/')
-		}
-		return null
+		return readStoredRelPakPath(dbPath)
 	} catch {
 		return null
 	}

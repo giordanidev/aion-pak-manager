@@ -15,9 +15,10 @@
 		"dist:linux:wsl:fedora": "node scripts/dist-linux-wsl.mjs fedora",
 		"build:app": "electron-vite build && node scripts/bundle-workers.mjs",
 		"preview": "electron-vite preview",
-		"cli": "node .build/backend/cli.js",
-		"unpak": "node .build/backend/cli.js unpak",
-		"repak": "node .build/backend/cli.js repak",
+		"cli": "electron .build/backend/cli.js",
+		"unpak": "electron .build/backend/cli.js unpak",
+		"repak": "electron .build/backend/cli.js repak",
+		"postinstall": "node scripts/rebuild-sqlite.mjs",
 		"precli": "node scripts/ensure-cli.mjs",
 		"preunpak": "node scripts/ensure-cli.mjs",
 		"prerepak": "node scripts/ensure-cli.mjs",
@@ -26,7 +27,9 @@
 		"typecheck": "npm run typecheck:node && npm run typecheck:web"
 	},
 	"devDependencies": {
+		"@electron/rebuild": "^3.7.1",
 		"@tailwindcss/vite": "^4.3.3",
+		"@types/better-sqlite3": "^7.6.12",
 		"@types/node": "^26.2.0",
 		"@vitejs/plugin-vue": "^6.0.8",
 		"electron": "^25.9.8",
@@ -68,7 +71,8 @@
 		"asarUnpack": [
 			".build/backend/workers/**/*",
 			".build/backend/chunks/**/*",
-			"node_modules/piscina/**"
+			"node_modules/piscina/**",
+			"node_modules/better-sqlite3/**"
 		],
 		"win": {
 			"icon": "frontend/assets/icon.ico",
@@ -111,6 +115,7 @@
 		}
 	},
 	"dependencies": {
+		"better-sqlite3": "^9.6.0",
 		"electron-updater": "^6.8.9",
 		"pinia": "^4.0.3",
 		"piscina": "^4.9.3",

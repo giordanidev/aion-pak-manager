@@ -1,13 +1,28 @@
 import { markRaw } from 'vue'
-import type { PakDatabaseInfo, SourceStampResult } from '../../shared/api-types'
-import { buildFileTreeIndex } from './file-tree-index'
+import type { DbOpenResult, DbTreeRow, PakDatabaseInfo } from '../../shared/api-types'
+import { buildFileTreeIndex, type FileTreeIndex } from './file-tree-index'
 import { buildDatabaseTree, isDbSearchDir, slimDatabaseInfo, type DbTreeNode } from './pak-database-tree'
-import { readStructureCache, structureCacheKey, structureStamp, writeStructureCache, type CachedStructure } from './structure-cache'
+import { readStructureCache, structureCacheKey, structureStamp, writeStructureCache } from './structure-cache'
 
-export type DatabaseCache = CachedStructure<DbTreeNode, PakDatabaseInfo>
+export type SqliteWarm = {
+  kind: 'sqlite'
+  info: PakDatabaseInfo
+  rootRows: DbTreeRow[]
+  prefetch: { parentId: number; rows: DbTreeRow[] }[]
+}
 
-interface StampApi {
-  sourceStamp(targetPath: string, kind: 'pak' | 'database', base?: string): Promise<SourceStampResult>
+export type LegacyWarm = {
+  kind: 'legacy'
+  root: DbTreeNode
+  index: FileTreeIndex<DbTreeNode>
+  info: PakDatabaseInfo
+}
+
+export type DatabaseCache = SqliteWarm | LegacyWarm
+
+interface WarmApi {
+  sourceStamp(targetPath: string, kind: 'pak' | 'database', base?: string): Promise<{ success: boolean; mtimeMs?: number; size?: number }>
+  dbOpen(dbPath: string, base?: string): Promise<DbOpenResult>
   readPakDatabase(dbPath: string, base?: string): Promise<{ success: boolean; info?: PakDatabaseInfo; error?: string }>
 }
 
@@ -17,20 +32,19 @@ function yieldToUi(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0))
 }
 
-async function loadDatabaseCache(dbPath: string, base: string | undefined, electron: StampApi): Promise<DatabaseCache | null> {
-  const key = structureCacheKey('db', dbPath)
-  let stamp = ''
+async function stampOf(electron: WarmApi, dbPath: string, base: string | undefined): Promise<string> {
   try {
     const stampResult = await electron.sourceStamp(dbPath, 'database', base)
     if (stampResult.success && typeof stampResult.mtimeMs === 'number') {
-      stamp = structureStamp(stampResult.mtimeMs, stampResult.size ?? 0)
+      return structureStamp(stampResult.mtimeMs, stampResult.size ?? 0)
     }
   } catch {
-    stamp = ''
+    return ''
   }
-  const usableStamp = stamp || 'session'
-  const hit = readStructureCache<DbTreeNode, PakDatabaseInfo>(key, usableStamp)
-  if (hit) return hit
+  return ''
+}
+
+async function loadLegacy(dbPath: string, base: string | undefined, electron: WarmApi): Promise<LegacyWarm | null> {
   const result = await electron.readPakDatabase(dbPath, base)
   if (!result.success || !result.info) throw new Error(result.error || 'empty database')
   const root = markRaw(await buildDatabaseTree(result.info))
@@ -39,13 +53,36 @@ async function loadDatabaseCache(dbPath: string, base: string | undefined, elect
     onYield: yieldToUi,
   })
   if (!indexed) return null
-  const slim = slimDatabaseInfo(result.info)
-  writeStructureCache(key, usableStamp, root, indexed, slim)
-  return { root, index: indexed, meta: slim }
+  return { kind: 'legacy', root, index: indexed, info: slimDatabaseInfo(result.info) }
 }
 
-/** Builds the structure index once per database and shares the in-flight job. */
-export function warmDatabaseCache(dbPath: string, base: string | undefined, electron: StampApi): Promise<DatabaseCache | null> {
+async function loadDatabaseCache(dbPath: string, base: string | undefined, electron: WarmApi): Promise<DatabaseCache | null> {
+  const key = structureCacheKey('db', dbPath)
+  let stamp = await stampOf(electron, dbPath, base)
+  const usable = stamp || 'session'
+  const hit = readStructureCache<DatabaseCache, PakDatabaseInfo>(key, usable)
+  if (hit) return hit.root
+  const opened = await electron.dbOpen(dbPath, base)
+  if (opened.success && opened.info && opened.root) {
+    stamp = await stampOf(electron, dbPath, base)
+    const slot: SqliteWarm = {
+      kind: 'sqlite',
+      info: opened.info,
+      rootRows: opened.root,
+      prefetch: opened.prefetch ?? [],
+    }
+    writeStructureCache(key, stamp || 'session', slot, null, opened.info)
+    return slot
+  }
+  if (!opened.fallback) throw new Error(opened.error || 'empty database')
+  const legacy = await loadLegacy(dbPath, base, electron)
+  if (!legacy) return null
+  writeStructureCache(key, usable, legacy, null, legacy.info)
+  return legacy
+}
+
+/** Opens the database once per path and shares the in-flight job. Converts JSON to SQLite on first open. */
+export function warmDatabaseCache(dbPath: string, base: string | undefined, electron: WarmApi): Promise<DatabaseCache | null> {
   const key = structureCacheKey('db', dbPath)
   const pending = inflight.get(key)
   if (pending) return pending
