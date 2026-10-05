@@ -31,21 +31,45 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
       class="w-full max-w-sm rounded-xl border border-border bg-card px-5 py-4 shadow-[0_8px_30px_rgba(0,0,0,0.45)]"
     >
       <div class="mb-3 flex items-start justify-between gap-3">
-        <h3 class="m-0 text-bright">{{ t('pak.conflictTitle') }}</h3>
-        <span class="flex-none text-xs text-dim tabular-nums">
+        <h3 class="m-0 text-bright">{{ request.summary ? t('pak.conflictSummaryTitle') : t('pak.conflictTitle') }}</h3>
+        <span v-if="!request.summary" class="flex-none text-xs text-dim tabular-nums">
           {{ t('pak.conflictCounter', { i: request.conflictIndex, total: request.conflictTotal }) }}
         </span>
       </div>
 
       <div class="flex flex-col gap-3">
         <p class="m-0 break-words text-sm text-text">
-          {{ t('pak.conflictBody', { name: request.packageName, dir: dirLabel('unpaked') }) }}
+          {{
+            request.summary
+              ? t('pak.conflictSummaryBody', { n: request.conflictTotal, dir: dirLabel('unpaked') })
+              : t('pak.conflictBody', { name: request.packageName, dir: dirLabel('unpaked') })
+          }}
         </p>
-        <p v-if="request.fileCount != null" class="m-0 text-xs text-dim">
+        <p v-if="!request.summary && request.fileCount != null" class="m-0 text-xs text-dim">
           {{ t('pak.conflictFiles', { n: request.fileCount }) }}
         </p>
 
-        <div class="grid grid-cols-2 gap-2">
+        <div v-if="request.summary" class="flex flex-col gap-2">
+          <button
+            class="box-border inline-flex h-9 items-center justify-center gap-2 rounded-lg bg-accent px-4 text-sm font-semibold text-white cursor-pointer transition duration-150 enabled:hover:bg-accent-hover"
+            @click="emit('choose', 'overwrite-all')"
+          >
+            {{ t('pak.conflictOverwriteAll') }}
+          </button>
+          <button
+            class="box-border inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-border bg-hover px-4 text-sm text-text cursor-pointer transition duration-150 enabled:hover:bg-border"
+            @click="emit('choose', 'skip-all')"
+          >
+            {{ t('pak.conflictSkipAll') }}
+          </button>
+          <button
+            class="box-border inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-border bg-card px-4 text-sm text-text cursor-pointer transition duration-150 enabled:hover:bg-hover"
+            @click="emit('choose', 'review')"
+          >
+            {{ t('pak.conflictReview') }}
+          </button>
+        </div>
+        <div v-else class="grid grid-cols-2 gap-2">
           <button
             class="box-border inline-flex h-9 items-center justify-center gap-2 rounded-lg bg-accent px-4 text-sm font-semibold text-white cursor-pointer transition duration-150 enabled:hover:bg-accent-hover"
             @click="emit('choose', 'overwrite')"

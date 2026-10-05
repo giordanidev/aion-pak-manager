@@ -554,6 +554,10 @@ export function useAppState() {
         percent = clampProgress(progress.percent ?? 0)
         break
       }
+      case 'extract-folder-conflicts':
+        label = { key: 'progress.conflictsReady', params: { n: progress.current ?? 0 } }
+        percent = clampProgress(progress.percent ?? actionHighWater)
+        break
       case 'extract-folder-check': {
         const name = base || pkg
         if (packageTotal > 1) {

@@ -289,7 +289,7 @@ export interface ExtractFolderPayload {
 }
 
 /** Answer to an interactive conflict prompt raised while un-paking a folder. */
-export type ConflictChoice = 'overwrite' | 'overwrite-all' | 'skip' | 'skip-all' | 'cancel';
+export type ConflictChoice = 'overwrite' | 'overwrite-all' | 'skip' | 'skip-all' | 'review' | 'cancel';
 
 /** Conflict of a single `.pak` already present in the aggregate DB manifest. */
 export interface ExtractConflictRequest {
@@ -298,6 +298,8 @@ export interface ExtractConflictRequest {
 	fileCount?: number;
 	conflictIndex: number;
 	conflictTotal: number;
+	/** Ask once for every remaining conflict, before the per-pak prompts. */
+	summary?: boolean;
 }
 
 /** Main -> renderer conflict request (carries the id needed to answer). */

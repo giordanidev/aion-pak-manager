@@ -760,15 +760,10 @@ export async function extractFolder(
 		if (candidates.length % 20 === 0) await pumpMain()
 	}
 
-	// Conflict pass: a candidate conflicts when its mirrored pak path is already
-	// in the aggregate DB manifest. `overwrite` (CLI/batch) resolves everything
-	// without asking; otherwise ask per pak — the UI may answer "all" so the
-	// remaining conflicts resolve silently. The pre-scan below doubles as the
-	// aggregate-DB manifest and the progress total, and emits verification
-	// progress so the bar moves while files are checked.
-	const conflictTotal = payload.overwrite
-		? 0
-		: candidates.filter((candidate) => byRelPakPath.has(candidate.relPakPath)).length
+	// Index pass: each configured thread takes the next .pak and reads its TOC.
+	// The file lists feed the progress total, the aggregate DB, and extraction
+	// (so the same pak is not scanned again). Overwrite questions start only
+	// after every index is known, so skip-all / one-by-one do not wait on disk.
 	let conflictMode: 'ask' | 'overwrite-all' | 'skip-all' = payload.overwrite ? 'overwrite-all' : 'ask'
 	let conflictSeen = 0
 	const jobs: PakJob[] = []
@@ -777,54 +772,95 @@ export async function extractFolder(
 	const totalPaks = Math.max(candidates.length, 1)
 	let checkedPaks = 0
 	let wasCanceled = false
-	/** TOC + XOR version from the conflict/check pass — reused by parallel extract. */
+	/** TOC + XOR version from the index pass — reused by parallel extract. */
 	const pakScans = new Map<string, PakScanResult>()
-	for (const candidate of candidates) {
+	const scanOutcomes = await mapPool(
+		candidates,
+		cpuThreadsForWork(),
+		async (candidate): Promise<{ ok: true; scan: PakScanResult } | { ok: false }> => {
+			abortIfCanceled(options.signal)
+			try {
+				const scan = await scanPakOffThread(candidate.pakPath, options.signal)
+				checkedPaks += 1
+				emitProgress(
+					'extract-folder-check',
+					(checkedPaks / totalPaks) * VERIFY_SHARE,
+					'',
+					`Checking ${candidate.relPakPath}`,
+					{ packageName: path.basename(candidate.pakPath), packageIndex: checkedPaks, packageTotal: candidates.length },
+				)
+				return { ok: true, scan }
+			} catch (error) {
+				if (options.signal?.aborted || errorMessage(error) === 'Operation canceled') throw error
+				failedPaks.push({ relPakPath: candidate.relPakPath, error: errorMessage(error) })
+				checkedPaks += 1
+				emitProgress(
+					'extract-folder-check',
+					(checkedPaks / totalPaks) * VERIFY_SHARE,
+					'',
+					`Skipped ${candidate.relPakPath}`,
+					{ packageName: path.basename(candidate.pakPath), packageIndex: checkedPaks, packageTotal: candidates.length },
+				)
+				return { ok: false }
+			}
+		},
+		options.signal,
+	)
+	let conflictTotal = 0
+	if (!payload.overwrite) {
+		for (let i = 0; i < candidates.length; i += 1) {
+			const outcome = scanOutcomes[i]
+			const candidate = candidates[i]
+			if (!outcome?.ok || !candidate) continue
+			if (byRelPakPath.has(candidate.relPakPath)) conflictTotal += 1
+		}
+	}
+	if (!wasCanceled && conflictMode === 'ask' && conflictTotal > 1 && options.onConflict) {
+		emitProgress('extract-folder-conflicts', VERIFY_SHARE, '', '', {
+			current: conflictTotal,
+			total: conflictTotal,
+		})
+		const choice = await options.onConflict({
+			packageName: '',
+			relPakPath: '',
+			fileCount: conflictTotal,
+			conflictIndex: 0,
+			conflictTotal,
+			summary: true,
+		})
+		if (choice === 'cancel') wasCanceled = true
+		else if (choice === 'skip-all' || choice === 'skip') conflictMode = 'skip-all'
+		else if (choice === 'overwrite-all' || choice === 'overwrite') conflictMode = 'overwrite-all'
+	}
+	for (let i = 0; i < candidates.length && !wasCanceled; i += 1) {
 		abortIfCanceled(options.signal)
+		const candidate = candidates[i] as PakJob
+		const outcome = scanOutcomes[i]
+		if (!outcome || !outcome.ok) continue
+		pakScans.set(candidate.pakPath, outcome.scan)
+		const files = outcome.scan.files
 		const isConflict = !payload.overwrite && byRelPakPath.has(candidate.relPakPath)
 		let accept = true
-		let files: string[] | null = null
-		try {
-			if (isConflict && conflictMode === 'ask') {
-				conflictSeen += 1
-				const scan = await scanPakOffThread(candidate.pakPath, options.signal)
-				pakScans.set(candidate.pakPath, scan)
-				files = scan.files
-				const choice = options.onConflict
-					? await options.onConflict({
-						packageName: path.basename(candidate.pakPath),
-						relPakPath: candidate.relPakPath,
-						fileCount: files.length,
-						conflictIndex: conflictSeen,
-						conflictTotal,
-					})
-					: 'skip'
-				if (choice === 'cancel') {
-					wasCanceled = true
-					break
-				}
-				if (choice === 'skip-all') { conflictMode = 'skip-all'; accept = false }
-				else if (choice === 'overwrite-all') { conflictMode = 'overwrite-all'; accept = true }
-				else accept = choice !== 'skip'
-			} else if (isConflict) {
-				accept = conflictMode === 'overwrite-all'
+		if (isConflict && conflictMode === 'ask') {
+			conflictSeen += 1
+			const choice = options.onConflict
+				? await options.onConflict({
+					packageName: path.basename(candidate.pakPath),
+					relPakPath: candidate.relPakPath,
+					fileCount: files.length,
+					conflictIndex: conflictSeen,
+					conflictTotal,
+				})
+				: 'skip'
+			if (choice === 'cancel') {
+				wasCanceled = true
+				break
 			}
-			if (!files) {
-				const scan = await scanPakOffThread(candidate.pakPath, options.signal)
-				pakScans.set(candidate.pakPath, scan)
-				files = scan.files
-			}
-		} catch (error) {
-			failedPaks.push({ relPakPath: candidate.relPakPath, error: errorMessage(error) })
-			checkedPaks += 1
-			emitProgress(
-				'extract-folder-check',
-				(checkedPaks / totalPaks) * VERIFY_SHARE,
-				'',
-				`Skipped ${candidate.relPakPath}`,
-				{ packageName: path.basename(candidate.pakPath), packageIndex: checkedPaks, packageTotal: candidates.length },
-			)
-			continue
+			if (choice === 'skip-all') { conflictMode = 'skip-all'; accept = false }
+			else if (choice === 'overwrite-all') { conflictMode = 'overwrite-all'; accept = true }
+			else accept = choice !== 'skip'
+		} else if (isConflict) {
+			accept = conflictMode === 'overwrite-all'
 		}
 		if (accept) {
 			await ensureDir(candidate.destDirAbs)
@@ -834,14 +870,6 @@ export async function extractFolder(
 			skippedFiles += files.length
 		}
 		pakFilesTotal += files.length
-		checkedPaks += 1
-		emitProgress(
-			'extract-folder-check',
-			(checkedPaks / totalPaks) * VERIFY_SHARE,
-			'',
-			`Checking ${candidate.relPakPath}`,
-			{ packageName: path.basename(candidate.pakPath), packageIndex: checkedPaks, packageTotal: candidates.length },
-		)
 	}
 
 	if (wasCanceled) {

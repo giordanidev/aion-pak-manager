@@ -70,7 +70,7 @@ interface PendingConflict {
 let pendingConflict: PendingConflict | null = null
 let conflictRequestSeq = 0
 
-const CONFLICT_CHOICES = ['overwrite', 'overwrite-all', 'skip', 'skip-all', 'cancel'] as const
+const CONFLICT_CHOICES = ['overwrite', 'overwrite-all', 'skip', 'skip-all', 'review', 'cancel'] as const
 
 function isConflictChoice(value: unknown): value is ConflictChoice {
 	return typeof value === 'string' && (CONFLICT_CHOICES as readonly string[]).includes(value)
